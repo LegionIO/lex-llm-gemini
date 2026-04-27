@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
-require 'legion/extensions/llm/gemini/provider_settings'
+require 'legion/extensions/llm/gemini/provider'
 require 'legion/extensions/llm/gemini/version'
 
 module Legion
@@ -14,10 +14,10 @@ module Legion
         PROVIDER_FAMILY = :gemini
 
         def self.default_settings
-          ProviderSettings.build(
+          ::Legion::Extensions::Llm.provider_settings(
             family: PROVIDER_FAMILY,
             instance: {
-              endpoint: 'https://generativelanguage.googleapis.com',
+              endpoint: 'https://generativelanguage.googleapis.com/v1beta',
               tier: :frontier,
               transport: :http,
               credentials: { api_key: 'env://GEMINI_API_KEY' },
@@ -26,7 +26,14 @@ module Legion
             }
           )
         end
+
+        def self.provider_class
+          Provider
+        end
       end
     end
   end
 end
+
+LexLLM::Provider.register(Legion::Extensions::Llm::Gemini::PROVIDER_FAMILY,
+                          Legion::Extensions::Llm::Gemini::Provider)
