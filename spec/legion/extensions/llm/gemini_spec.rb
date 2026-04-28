@@ -3,11 +3,11 @@
 require 'spec_helper'
 
 RSpec.describe Legion::Extensions::Llm::Gemini do
-  let(:provider) { described_class::Provider.new(LexLLM.config) }
-  let(:flash_model) { LexLLM::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini) }
+  let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
+  let(:flash_model) { Legion::Extensions::Llm::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini) }
 
   before do
-    LexLLM.config.gemini_api_key = 'test-key'
+    Legion::Extensions::Llm.config.gemini_api_key = 'test-key'
   end
 
   it 'exposes provider defaults with inherited fleet settings' do
@@ -19,8 +19,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(settings.dig(:instances, :default, :usage, :embedding)).to be true
   end
 
-  it 'registers the LexLLM provider class' do
-    expect(LexLLM::Provider.resolve(:gemini)).to eq(described_class::Provider)
+  it 'registers the Legion::Extensions::Llm provider class' do
+    expect(Legion::Extensions::Llm::Provider.resolve(:gemini)).to eq(described_class::Provider)
   end
 
   it 'exposes Gemini API base and model listing helpers' do
@@ -59,8 +59,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   def chat_payload
     messages = [
-      LexLLM::Message.new(role: :system, content: 'Be terse.'),
-      LexLLM::Message.new(role: :user, content: 'hello')
+      Legion::Extensions::Llm::Message.new(role: :system, content: 'Be terse.'),
+      Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
     ]
 
     provider.send(:render_payload, messages, tools: {}, temperature: 0.2, model: flash_model, stream: false,

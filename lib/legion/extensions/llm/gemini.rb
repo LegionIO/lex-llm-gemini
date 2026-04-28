@@ -35,5 +35,5 @@ module Legion
   end
 end
 
-LexLLM::Provider.register(Legion::Extensions::Llm::Gemini::PROVIDER_FAMILY,
-                          Legion::Extensions::Llm::Gemini::Provider)
+Legion::Extensions::Llm::Provider.register(Legion::Extensions::Llm::Gemini::PROVIDER_FAMILY,
+                                           Legion::Extensions::Llm::Gemini::Provider)

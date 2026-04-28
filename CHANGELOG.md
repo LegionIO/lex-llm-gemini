@@ -1,8 +1,14 @@
 # Changelog
 
+## 0.1.2 - 2026-04-28
+
+- Replace fork-era namespace references with the standard Legion::Extensions::Llm provider contract.
+- Remove GitHub-based lex-llm Gemfile fallback so test installs use only a guarded local path or released gem dependency.
+- Require lex-llm >= 0.1.3 for the cleaned Legion-native base extension.
+
 ## 0.1.1 - 2026-04-27
 
-- Add the Gemini LexLLM provider class with generateContent, streaming, model listing, and embedContent helpers.
+- Add the Gemini Legion::Extensions::Llm provider class with generateContent, streaming, model listing, and embedContent helpers.
 - Use shared `Legion::Extensions::Llm.provider_settings` defaults from `lex-llm`.
 - Remove the committed `Gemfile.lock`.
 

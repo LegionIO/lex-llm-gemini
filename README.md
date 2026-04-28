@@ -6,7 +6,7 @@ This gem lives under `Legion::Extensions::Llm::Gemini` and depends on `lex-llm` 
 
 ## What It Provides
 
-- `LexLLM::Provider` registration as `:gemini`
+- `Legion::Extensions::Llm::Provider` registration as `:gemini`
 - Gemini-native chat requests through `POST /v1beta/{model=models/*}:generateContent`
 - streaming chat support through `POST /v1beta/{model=models/*}:streamGenerateContent?alt=sse`
 - model discovery through `GET /v1beta/models`
@@ -35,7 +35,7 @@ Legion::Extensions::Llm::Gemini.default_settings
 ## Configuration
 
 ```ruby
-LexLLM.configure do |config|
+Legion::Extensions::Llm.configure do |config|
   config.gemini_api_key = ENV.fetch("GEMINI_API_KEY")
   config.gemini_api_base = "https://generativelanguage.googleapis.com/v1beta"
   config.default_model = "gemini-2.0-flash"

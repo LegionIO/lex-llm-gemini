@@ -1,14 +1,14 @@
 # frozen_string_literal: true
 
-require 'lex_llm'
+require 'legion/extensions/llm'
 require 'legion/json'
 
 module Legion
   module Extensions
     module Llm
       module Gemini
-        # Gemini provider implementation for the LexLLM base provider contract.
-        class Provider < LexLLM::Provider # rubocop:disable Metrics/ClassLength
+        # Gemini provider implementation for the Legion::Extensions::Llm base provider contract.
+        class Provider < Legion::Extensions::Llm::Provider # rubocop:disable Metrics/ClassLength
           class << self
             def slug = 'gemini'
             def configuration_options = %i[gemini_api_key gemini_api_base]
@@ -148,9 +148,9 @@ module Legion
           end
 
           def content_parts(content)
-            return Array(content.value) if content.is_a?(LexLLM::Content::Raw)
+            return Array(content.value) if content.is_a?(Legion::Extensions::Llm::Content::Raw)
             return [{ text: Legion::JSON.generate(content) }] if content.is_a?(Hash) || content.is_a?(Array)
-            return [{ text: content.to_s }] unless content.is_a?(LexLLM::Content)
+            return [{ text: content.to_s }] unless content.is_a?(Legion::Extensions::Llm::Content)
 
             parts = []
             parts << { text: content.text } if content.text
@@ -202,7 +202,7 @@ module Legion
             body = response.body
             parts = response_parts(body)
 
-            LexLLM::Message.new(
+            Legion::Extensions::Llm::Message.new(
               role: :assistant,
               content: text_content(parts),
               tool_calls: parse_tool_calls(parts),
@@ -218,7 +218,7 @@ module Legion
           def build_chunk(data)
             parts = response_parts(data)
 
-            LexLLM::Chunk.new(
+            Legion::Extensions::Llm::Chunk.new(
               role: :assistant,
               content: text_content(parts),
               tool_calls: parse_tool_calls(parts),
@@ -253,7 +253,7 @@ module Legion
               next unless function_call
 
               id = SecureRandom.uuid
-              result[id] = LexLLM::ToolCall.new(
+              result[id] = Legion::Extensions::Llm::ToolCall.new(
                 id: id,
                 name: function_call['name'],
                 arguments: function_call['args'] || {}
@@ -268,7 +268,7 @@ module Legion
               model_id = model_data.fetch('name').delete_prefix('models/')
               methods = Array(model_data['supportedGenerationMethods'])
 
-              LexLLM::Model::Info.new(
+              Legion::Extensions::Llm::Model::Info.new(
                 id: model_id,
                 name: model_data['displayName'] || model_id,
                 provider: provider,
@@ -300,7 +300,7 @@ module Legion
           end
 
           def parse_embedding_response(response, model:, **)
-            LexLLM::Embedding.new(
+            Legion::Extensions::Llm::Embedding.new(
               vectors: response.body.dig('embedding', 'values'),
               model: model,
               input_tokens: response.body.dig('usageMetadata', 'promptTokenCount').to_i
