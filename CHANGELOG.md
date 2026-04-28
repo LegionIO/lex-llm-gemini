@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4 - 2026-04-28
+
+- Read Gemini `supportedGenerationMethods` from discovered model metadata when mapping chat, streaming, and embedding capabilities.
+- Cover embedding-only model discovery metadata for routing.
+
 ## 0.1.3 - 2026-04-28
 
 - Remove the leftover compatibility entrypoint outside the Legion namespace.

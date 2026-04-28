@@ -51,6 +51,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   it 'parses Gemini model listings' do
     expect(models.first.to_h).to include(id: 'gemini-2.0-flash', provider: :gemini)
     expect(models.first.capabilities).to include('streaming', 'function_calling', 'vision')
+    expect(models.last.capabilities).to eq(['embeddings'])
+    expect(models.last.modalities.to_h).to eq(input: ['text'], output: ['embeddings'])
   end
 
   it 'parses Gemini embedding responses' do
@@ -100,6 +102,12 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
         'inputTokenLimit' => 1_048_576,
         'outputTokenLimit' => 8192,
         'supportedGenerationMethods' => %w[generateContent streamGenerateContent]
+      }, {
+        'name' => 'models/gemini-embedding-001',
+        'displayName' => 'Gemini Embedding',
+        'inputTokenLimit' => 2048,
+        'outputTokenLimit' => 1,
+        'supportedGenerationMethods' => %w[embedContent]
       }]
     }
   end

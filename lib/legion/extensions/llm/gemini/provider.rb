@@ -22,7 +22,7 @@ module Legion
             def chat?(model) = supported?(model, 'generateContent')
             def streaming?(model) = supported?(model, 'streamGenerateContent')
             def embeddings?(model) = supported?(model, 'embedContent')
-            def vision?(model) = model_id(model).match?(/gemini|flash|pro/)
+            def vision?(model) = chat?(model) && model_id(model).match?(/gemini|flash|pro/)
             def functions?(model) = chat?(model)
 
             def critical_capabilities_for(model)
@@ -44,7 +44,8 @@ module Legion
 
             def generation_methods(model)
               metadata = metadata_for(model)
-              Array(metadata[:supported_generation_methods] || metadata['supported_generation_methods'])
+              Array(metadata[:supported_generation_methods] || metadata['supported_generation_methods'] ||
+                    metadata['supportedGenerationMethods'])
             end
 
             def model_id(model)

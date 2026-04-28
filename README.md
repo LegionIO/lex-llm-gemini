@@ -13,6 +13,7 @@ Load it with `require 'legion/extensions/llm/gemini'`.
 - streaming chat support through `POST /v1beta/{model=models/*}:streamGenerateContent?alt=sse`
 - model discovery through `GET /v1beta/models`
 - embeddings through `POST /v1beta/{model=models/*}:embedContent`
+- normalized chat, streaming, vision, function calling, and embedding capability mapping from `supportedGenerationMethods`
 - shared fleet/default settings via `Legion::Extensions::Llm.provider_settings`
 
 ## Defaults
