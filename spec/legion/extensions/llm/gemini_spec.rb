@@ -5,6 +5,7 @@ require 'spec_helper'
 RSpec.describe Legion::Extensions::Llm::Gemini do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
   let(:flash_model) { Legion::Extensions::Llm::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini) }
+  let(:registry_publisher) { instance_double(described_class::RegistryPublisher) }
 
   before do
     Legion::Extensions::Llm.config.gemini_api_key = 'test-key'
@@ -55,6 +56,23 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(models.last.modalities.to_h).to eq(input: ['text'], output: ['embeddings'])
   end
 
+  it 'publishes discovered models asynchronously through the registry publisher' do
+    stub_registry_publisher
+    stub_model_discovery
+
+    models = provider.list_models
+
+    expect_registry_publish(models)
+  end
+
+  it 'builds sanitized lex-llm registry events for Gemini model availability' do
+    events = capture_registry_events([flash_model], readiness: { ready: true })
+
+    expect(events.first.to_h).to include(event_type: :offering_available)
+    expect(events.first.to_h.dig(:offering, :provider_family)).to eq(:gemini)
+    expect(events.first.to_h.dig(:offering, :model)).to eq('gemini-2.0-flash')
+  end
+
   it 'parses Gemini embedding responses' do
     expect([embedding.vectors, embedding.input_tokens]).to eq([[0.1, 0.2], 2])
   end
@@ -71,6 +89,30 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   def fake_response(body)
     Struct.new(:body).new(body)
+  end
+
+  def stub_registry_publisher
+    allow(described_class::Provider).to receive(:registry_publisher).and_return(registry_publisher)
+    allow(registry_publisher).to receive(:publish_models_async)
+  end
+
+  def stub_model_discovery
+    allow(provider.connection).to receive(:get).with('models').and_return(fake_response(models_response_body))
+  end
+
+  def expect_registry_publish(models)
+    expect(registry_publisher).to have_received(:publish_models_async)
+      .with(models, readiness: hash_including(provider: :gemini, live: false))
+  end
+
+  def capture_registry_events(models, readiness:)
+    publisher = described_class::RegistryPublisher.new
+    events = []
+    allow(publisher).to receive(:publishing_available?).and_return(true)
+    allow(publisher).to receive(:publish_event) { |event| events << event }
+    allow(Thread).to receive(:new).and_yield
+    publisher.publish_models_async(models, readiness:)
+    events
   end
 
   def generation_url

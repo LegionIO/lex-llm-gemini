@@ -9,10 +9,16 @@ module Legion
         # Gemini provider implementation for the Legion::Extensions::Llm base provider contract.
         class Provider < Legion::Extensions::Llm::Provider # rubocop:disable Metrics/ClassLength
           class << self
+            attr_writer :registry_publisher
+
             def slug = 'gemini'
             def configuration_options = %i[gemini_api_key gemini_api_base]
             def configuration_requirements = %i[gemini_api_key]
             def capabilities = Capabilities
+
+            def registry_publisher
+              @registry_publisher ||= RegistryPublisher.new
+            end
           end
 
           # Capability predicates for Gemini API models.
@@ -85,6 +91,12 @@ module Legion
 
           def embed_content_url(model:)
             "#{model_path(model)}:embedContent"
+          end
+
+          def list_models
+            super.tap do |models|
+              self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
+            end
           end
 
           private
