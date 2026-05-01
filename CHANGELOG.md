@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 - 2026-05-01
+
+- Add auto-discovery via CredentialSources and AutoRegistration from lex-llm 0.3.0
+- Self-register discovered instances into Call::Registry at require-time
+- Require lex-llm >= 0.3.0
+
+
 ## 0.2.0 - 2026-04-30
 
 - **Breaking**: Adopt the base contract from lex-llm 0.1.9.
