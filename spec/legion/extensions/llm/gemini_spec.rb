@@ -83,6 +83,68 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(publisher.provider_family).to eq(:gemini)
   end
 
+  describe '.discover_instances' do
+    before do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:env).and_call_original
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:env).with('GEMINI_API_KEY').and_return(nil)
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(nil)
+    end
+
+    it 'returns an empty hash when no credentials are available' do
+      expect(described_class.discover_instances).to eq({})
+    end
+
+    it 'discovers an :env instance from the GEMINI_API_KEY environment variable' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:env).with('GEMINI_API_KEY').and_return('gk-123')
+
+      instances = described_class.discover_instances
+
+      expect(instances[:env]).to include(gemini_api_key: 'gk-123', tier: :cloud)
+    end
+
+    it 'discovers a :settings instance from extension settings' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :gemini)
+        .and_return({ api_key: 'gk-settings' })
+
+      instances = described_class.discover_instances
+
+      expect(instances[:settings]).to include(gemini_api_key: 'gk-settings', tier: :cloud)
+    end
+
+    it 'discovers named instances from the settings instances sub-key' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :gemini)
+        .and_return({ instances: { staging: { gemini_api_key: 'gk-staging' } } })
+
+      instances = described_class.discover_instances
+
+      expect(instances[:staging]).to include(gemini_api_key: 'gk-staging', tier: :cloud)
+    end
+
+    it 'deduplicates credentials when env and settings share the same key' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:env).with('GEMINI_API_KEY').and_return('gk-same')
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :gemini)
+        .and_return({ api_key: 'gk-same' })
+
+      instances = described_class.discover_instances
+
+      expect(instances.keys).to eq([:env])
+    end
+
+    it 'keeps both instances when credentials differ' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:env).with('GEMINI_API_KEY').and_return('gk-env')
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :gemini)
+        .and_return({ api_key: 'gk-settings' })
+
+      instances = described_class.discover_instances
+
+      expect(instances.keys).to contain_exactly(:env, :settings)
+    end
+  end
+
   def chat_payload
     messages = [
       Legion::Extensions::Llm::Message.new(role: :system, content: 'Be terse.'),
