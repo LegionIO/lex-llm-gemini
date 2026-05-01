@@ -6,7 +6,7 @@ module Legion
       module Gemini
         # Best-effort publisher for Gemini provider availability events.
         class RegistryPublisher
-          include Legion::Logging::Helper if defined?(Legion::Logging::Helper)
+          include Legion::Logging::Helper
 
           APP_ID = 'lex-llm-gemini'
 

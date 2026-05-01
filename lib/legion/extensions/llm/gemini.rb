@@ -12,7 +12,7 @@ module Legion
       # Gemini provider extension namespace.
       module Gemini
         extend ::Legion::Extensions::Core if ::Legion::Extensions.const_defined?(:Core, false)
-        extend Legion::Logging::Helper if defined?(Legion::Logging::Helper)
+        extend Legion::Logging::Helper
 
         PROVIDER_FAMILY = :gemini
 
