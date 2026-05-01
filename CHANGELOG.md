@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 - 2026-04-30
+
+- **Breaking**: Adopt the base contract from lex-llm 0.1.9.
+- Replace `default_settings` with a flat settings hash (enabled, default_model, api_key, whitelist/blacklist, tls, instances).
+- Remove local `RegistryPublisher` and `RegistryEventBuilder`; use the parameterized base classes from lex-llm.
+- Remove local `transport/` directory (exchanges and messages); the shared `llm.registry` transport in lex-llm is used instead.
+- Remove the deprecated `Provider.register` call; configuration options are registered directly.
+- Update `parse_list_models_response` to use the new `Model::Info` constructor (context_length, modalities_input/output, metadata for max_output_tokens).
+- Require `lex-llm >= 0.1.9`.
+
 ## 0.1.7 - 2026-04-30
 
 - Audit logging, rescue blocks, and README for full observability.

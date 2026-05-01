@@ -1,13 +1,12 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
-require 'legion/extensions/llm/gemini/registry_event_builder'
-require 'legion/extensions/llm/gemini/registry_publisher'
 require 'legion/extensions/llm/gemini/provider'
 require 'legion/extensions/llm/gemini/version'
 
 module Legion
   module Extensions
+    # LLM provider framework namespace (reopened by provider extensions).
     module Llm
       # Gemini provider extension namespace.
       module Gemini
@@ -17,26 +16,24 @@ module Legion
         PROVIDER_FAMILY = :gemini
 
         def self.default_settings
-          ::Legion::Extensions::Llm.provider_settings(
-            family: PROVIDER_FAMILY,
-            instance: {
-              endpoint: 'https://generativelanguage.googleapis.com/v1beta',
-              tier: :frontier,
-              transport: :http,
-              credentials: { api_key: 'env://GEMINI_API_KEY' },
-              usage: { inference: true, embedding: true },
-              limits: { concurrency: 4 }
-            }
-          )
+          {
+            enabled: false,
+            default_model: 'gemini-2.0-flash',
+            api_key: nil,
+            model_whitelist: [],
+            model_blacklist: [],
+            model_cache_ttl: 3600,
+            tls: { enabled: false, verify: :peer },
+            instances: {}
+          }
         end
 
         def self.provider_class
           Provider
         end
       end
+
+      Configuration.register_provider_options(Gemini::Provider.configuration_options)
     end
   end
 end
-
-Legion::Extensions::Llm::Provider.register(Legion::Extensions::Llm::Gemini::PROVIDER_FAMILY,
-                                           Legion::Extensions::Llm::Gemini::Provider)

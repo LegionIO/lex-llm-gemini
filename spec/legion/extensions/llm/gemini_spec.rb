@@ -5,23 +5,23 @@ require 'spec_helper'
 RSpec.describe Legion::Extensions::Llm::Gemini do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
   let(:flash_model) { Legion::Extensions::Llm::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini) }
-  let(:registry_publisher) { instance_double(described_class::RegistryPublisher) }
+  let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
 
   before do
     Legion::Extensions::Llm.config.gemini_api_key = 'test-key'
   end
 
-  it 'exposes provider defaults with inherited fleet settings' do
+  it 'exposes provider defaults with the new flat settings shape' do
     settings = described_class.default_settings
 
-    expect(settings[:provider_family]).to eq(:gemini)
-    expect(settings[:fleet]).to include(:enabled)
-    expect(settings.dig(:instances, :default, :endpoint)).to eq('https://generativelanguage.googleapis.com/v1beta')
-    expect(settings.dig(:instances, :default, :usage, :embedding)).to be true
-  end
-
-  it 'registers the Legion::Extensions::Llm provider class' do
-    expect(Legion::Extensions::Llm::Provider.resolve(:gemini)).to eq(described_class::Provider)
+    expect(settings[:enabled]).to be false
+    expect(settings[:default_model]).to eq('gemini-2.0-flash')
+    expect(settings[:api_key]).to be_nil
+    expect(settings[:model_whitelist]).to eq([])
+    expect(settings[:model_blacklist]).to eq([])
+    expect(settings[:model_cache_ttl]).to eq(3600)
+    expect(settings[:tls]).to eq(enabled: false, verify: :peer)
+    expect(settings[:instances]).to eq({})
   end
 
   it 'exposes Gemini API base and model listing helpers' do
@@ -51,12 +51,12 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   it 'parses Gemini model listings' do
     expect(models.first.to_h).to include(id: 'gemini-2.0-flash', provider: :gemini)
-    expect(models.first.capabilities).to include('streaming', 'function_calling', 'vision')
-    expect(models.last.capabilities).to eq(['embeddings'])
+    expect(models.first.capabilities).to include(:streaming, :function_calling, :vision)
+    expect(models.last.capabilities).to eq([:embeddings])
     expect(models.last.modalities.to_h).to eq(input: ['text'], output: ['embeddings'])
   end
 
-  it 'publishes discovered models asynchronously through the registry publisher' do
+  it 'publishes discovered models asynchronously through the base registry publisher' do
     stub_registry_publisher
     stub_model_discovery
 
@@ -75,6 +75,12 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   it 'parses Gemini embedding responses' do
     expect([embedding.vectors, embedding.input_tokens]).to eq([[0.1, 0.2], 2])
+  end
+
+  it 'uses the base RegistryPublisher parameterized with :gemini' do
+    publisher = described_class::Provider.registry_publisher
+    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
+    expect(publisher.provider_family).to eq(:gemini)
   end
 
   def chat_payload
@@ -106,7 +112,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   end
 
   def capture_registry_events(models, readiness:)
-    publisher = described_class::RegistryPublisher.new
+    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :gemini)
     events = []
     allow(publisher).to receive(:publishing_available?).and_return(true)
     allow(publisher).to receive(:publish_event) { |event| events << event }

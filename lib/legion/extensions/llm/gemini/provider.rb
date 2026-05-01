@@ -19,7 +19,7 @@ module Legion
             def capabilities = Capabilities
 
             def registry_publisher
-              @registry_publisher ||= RegistryPublisher.new
+              @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :gemini)
             end
           end
 
@@ -283,16 +283,18 @@ module Legion
             Array(response.body['models']).map do |model_data|
               model_id = model_data.fetch('name').delete_prefix('models/')
               methods = Array(model_data['supportedGenerationMethods'])
+              input_mods, output_mods = modalities_for(methods)
 
               Legion::Extensions::Llm::Model::Info.new(
                 id: model_id,
                 name: model_data['displayName'] || model_id,
                 provider: provider,
-                context_window: model_data['inputTokenLimit'],
-                max_output_tokens: model_data['outputTokenLimit'],
+                context_length: model_data['inputTokenLimit'],
                 capabilities: capabilities.critical_capabilities_for(model_data),
-                modalities: modalities_for(methods),
+                modalities_input: input_mods,
+                modalities_output: output_mods,
                 metadata: {
+                  max_output_tokens: model_data['outputTokenLimit'],
                   version: model_data['version'],
                   description: model_data['description'],
                   supported_generation_methods: methods
@@ -302,9 +304,9 @@ module Legion
           end
 
           def modalities_for(methods)
-            return { input: %w[text], output: %w[embeddings] } if methods.include?('embedContent')
+            return [%w[text], %w[embeddings]] if methods.include?('embedContent')
 
-            { input: %w[text image audio video], output: %w[text] }
+            [%w[text image audio video], %w[text]]
           end
 
           def render_embedding_payload(text, model:, dimensions:)
