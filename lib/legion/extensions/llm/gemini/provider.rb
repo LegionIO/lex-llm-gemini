@@ -8,6 +8,8 @@ module Legion
       module Gemini
         # Gemini provider implementation for the Legion::Extensions::Llm base provider contract.
         class Provider < Legion::Extensions::Llm::Provider # rubocop:disable Metrics/ClassLength
+          include Legion::Logging::Helper
+
           class << self
             attr_writer :registry_publisher
 
@@ -94,7 +96,9 @@ module Legion
           end
 
           def list_models
+            log.info { 'listing available Gemini models' }
             super.tap do |models|
+              log.info { "discovered #{models.size} Gemini model(s); publishing to registry" }
               self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
             end
           end

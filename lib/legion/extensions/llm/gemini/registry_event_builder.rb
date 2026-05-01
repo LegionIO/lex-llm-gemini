@@ -6,6 +6,8 @@ module Legion
       module Gemini
         # Builds sanitized lex-llm registry envelopes for Gemini provider state.
         class RegistryEventBuilder
+          include Legion::Logging::Helper
+
           def model_available(model, readiness:)
             registry_event_class.available(
               model_offering(model),
@@ -58,7 +60,8 @@ module Legion
             configured_node = (::Legion::Settings.dig(:node, :canonical_name) if defined?(::Legion::Settings))
             value = configured_node.to_s.strip
             value.empty? ? :gemini : value.to_sym
-          rescue StandardError
+          rescue StandardError => e
+            handle_exception(e, level: :debug, handled: true, operation: 'gemini.registry.provider_instance')
             :gemini
           end
 

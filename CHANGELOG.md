@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.7 - 2026-04-30
+
+- Audit logging, rescue blocks, and README for full observability.
+- Add `Legion::Logging::Helper` to every module and class in lib/.
+- Replace all bare rescue blocks and custom `log_publish_failure` with `handle_exception(e, level:, handled:, operation:)`.
+- Add info-level action logging for model listing and registry publishing.
+- Update README to reflect registry event publishing and observability patterns.
+
 ## 0.1.6 - 2026-04-28
 
 - Publish best-effort `llm.registry` discovered-model availability events when transport is already loaded.
