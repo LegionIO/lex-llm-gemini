@@ -6,7 +6,7 @@ module Legion
       module Gemini
         # Builds sanitized lex-llm registry envelopes for Gemini provider state.
         class RegistryEventBuilder
-          include Legion::Logging::Helper
+          include Legion::Logging::Helper if defined?(Legion::Logging::Helper)
 
           def model_available(model, readiness:)
             registry_event_class.available(
