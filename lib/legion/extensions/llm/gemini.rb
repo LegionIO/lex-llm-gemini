@@ -20,7 +20,7 @@ module Legion
           ::Legion::Extensions::Llm.provider_settings(
             family: PROVIDER_FAMILY,
             instance: {
-              endpoint: 'https://generativelanguage.googleapis.com',
+              endpoint: 'https://generativelanguage.googleapis.com/v1beta',
               default_model: 'gemini-2.0-flash',
               tier: :frontier,
               transport: :http,

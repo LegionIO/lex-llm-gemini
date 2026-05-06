@@ -2,7 +2,7 @@
 
 LegionIO LLM provider extension for Google Gemini.
 
-This gem lives under `Legion::Extensions::Llm::Gemini` and depends on `lex-llm >= 0.4.0` for shared provider-neutral routing, response normalization, fleet envelopes, and schema primitives.
+This gem lives under `Legion::Extensions::Llm::Gemini` and depends on `lex-llm >= 0.4.3` for shared provider-neutral routing, response normalization, fleet responder execution, and schema primitives. It does not require or call `legion-llm` at runtime; `legion-llm` owns adapter creation, routing, and registry writes after discovering loaded `lex-llm-*` provider gems.
 
 Load it with `require 'legion/extensions/llm/gemini'`.
 
@@ -21,12 +21,10 @@ Load it with `require 'legion/extensions/llm/gemini'`.
 
 | Path | Purpose |
 |------|---------|
-| `lib/legion/extensions/llm/gemini.rb` | Entry point; provider registration |
+| `lib/legion/extensions/llm/gemini.rb` | Entry point; provider discovery metadata and defaults |
 | `lib/legion/extensions/llm/gemini/provider.rb` | Gemini provider (chat, streaming, models, embeddings) |
-| `lib/legion/extensions/llm/gemini/registry_event_builder.rb` | Builds sanitized lex-llm registry event envelopes |
-| `lib/legion/extensions/llm/gemini/registry_publisher.rb` | Best-effort async publisher for model availability events |
-| `lib/legion/extensions/llm/gemini/transport/exchanges/llm_registry.rb` | `llm.registry` AMQP topic exchange |
-| `lib/legion/extensions/llm/gemini/transport/messages/registry_event.rb` | AMQP message wrapper for registry events |
+| `lib/legion/extensions/llm/gemini/actors/fleet_worker.rb` | Provider-owned fleet subscription actor |
+| `lib/legion/extensions/llm/gemini/runners/fleet_worker.rb` | Fleet runner delegating to `Legion::Extensions::Llm::Fleet::ProviderResponder` |
 | `lib/legion/extensions/llm/gemini/version.rb` | `VERSION` constant |
 
 ## Defaults
@@ -61,7 +59,7 @@ end
 
 ## Fleet Responder
 
-Provider instances can opt in to consuming Legion LLM fleet requests. The provider-owned fleet actor only starts when at least one configured instance enables `respond_to_requests`.
+Provider instances can opt in to consuming Legion LLM fleet requests. The provider-owned fleet actor only starts when at least one discovered instance enables `fleet.respond_to_requests`, and execution delegates to `Legion::Extensions::Llm::Fleet::ProviderResponder` from `lex-llm`.
 
 ```yaml
 extensions:
@@ -80,19 +78,18 @@ extensions:
 
 ## Observability
 
-Every module and class includes or extends `Legion::Logging::Helper`:
+The Gemini entry point and provider use `Legion::Logging::Helper`:
 
-- **Info-level logging** on `list_models` and registry event publishing.
-- **All rescue blocks** call `handle_exception(e, level:, handled:, operation:)` for structured exception telemetry.
-- Registry publishing is best-effort; failures are handled at `:debug` or `:warn` level and never block the caller.
+- `list_models` logs model discovery activity and publishes availability through the shared `lex-llm` registry publisher.
+- Fleet request execution is delegated to the shared responder helper so acking, response publishing, and responder failures stay inside the provider-neutral fleet boundary.
+- Registry publishing is best-effort and must not block provider calls when transport is unavailable.
 
 ## Development
 
 ```bash
 bundle install
-bundle exec rspec       # 0 failures
-bundle exec rubocop -A  # auto-fix
-bundle exec rubocop     # lint check
+bundle exec rspec --format json --out tmp/rspec_results.json --format progress --out tmp/rspec_progress.txt
+bundle exec rubocop -A
 ```
 
 ## License

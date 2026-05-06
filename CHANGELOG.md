@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.5 - 2026-05-06
+
+- Keep the default Gemini endpoint on the versioned `v1beta` API base when instance settings are normalized.
+- Refresh the README for the current `lex-llm >= 0.4.3` provider registry and fleet responder boundary.
+
 ## 0.3.4 - 2026-05-06
 
 - Use the shared `lex-llm` fleet provider responder helper for provider-owned fleet workers.
