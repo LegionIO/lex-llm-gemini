@@ -4,7 +4,7 @@ module Legion
   module Extensions
     module Llm
       module Gemini
-        VERSION = '0.3.0'
+        VERSION = '0.3.6'
       end
     end
   end
