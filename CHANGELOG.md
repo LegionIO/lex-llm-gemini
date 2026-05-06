@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.6 - 2026-05-06
+
+- Load provider-owned fleet actors through the LegionIO subscription base and the canonical Gemini provider root.
+- Keep fleet runners anchored on the provider root namespace so provider constants and instance discovery are always loaded.
+- Strip temporary generic API key fields from discovered Gemini instance configs after credential deduplication.
+- Gate release publishing on the shared security workflow.
+
 ## 0.3.5 - 2026-05-06
 
 - Keep the default Gemini endpoint on the versioned `v1beta` API base when instance settings are normalized.

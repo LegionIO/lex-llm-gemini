@@ -47,7 +47,7 @@ module Legion
           candidates = {}
           discover_from_env(candidates)
           discover_from_settings(candidates)
-          CredentialSources.dedup_credentials(candidates)
+          CredentialSources.dedup_credentials(candidates).transform_values { |config| sanitize_instance_config(config) }
         end
 
         def self.discover_from_env(candidates)
@@ -84,21 +84,27 @@ module Legion
             normalized = normalize_instance_config(config)
             next unless normalized[:gemini_api_key]
 
+            normalized[:api_key] = normalized[:gemini_api_key]
             candidates[name.to_sym] = normalized.merge(tier: :cloud)
           end
         end
 
         def self.normalize_instance_config(config) # rubocop:disable Metrics/AbcSize
           normalized = config.to_h.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
-          normalized[:gemini_api_key] ||= normalized[:api_key]
+          normalized[:gemini_api_key] ||= normalized.delete(:api_key)
           normalized[:gemini_api_base] ||= normalized.delete(:base_url)
           normalized[:gemini_api_base] ||= normalized.delete(:api_base)
           normalized[:gemini_api_base] ||= normalized.delete(:endpoint)
           normalized.compact.except(:instances)
         end
 
+        def self.sanitize_instance_config(config)
+          config.except(:api_key)
+        end
+
         private_class_method :discover_from_env, :discover_from_settings,
-                             :add_settings_api_key, :add_settings_instances, :normalize_instance_config
+                             :add_settings_api_key, :add_settings_instances, :normalize_instance_config,
+                             :sanitize_instance_config
 
         Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options) if
           Legion::Extensions::Llm::Configuration.respond_to?(:register_provider_options)

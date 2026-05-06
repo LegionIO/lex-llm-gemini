@@ -123,6 +123,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
                                               gemini_api_base: 'https://gemini.example/v1beta',
                                               tier: :cloud)
       expect(instances[:settings]).not_to have_key(:endpoint)
+      expect(instances[:settings]).not_to have_key(:api_key)
     end
 
     it 'discovers named instances from the settings instances sub-key' do
@@ -135,6 +136,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       expect(instances[:staging]).to include(gemini_api_key: 'gk-staging',
                                              gemini_api_base: 'https://staging.example',
                                              tier: :cloud)
+      expect(instances[:staging]).not_to have_key(:api_key)
     end
 
     it 'deduplicates credentials when env and settings share the same key' do
