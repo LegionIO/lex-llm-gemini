@@ -11,17 +11,16 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     Legion::Extensions::Llm.config.gemini_api_key = 'test-key'
   end
 
-  it 'exposes provider defaults with the new flat settings shape' do
+  it 'exposes provider defaults through the shared provider settings shape' do
     settings = described_class.default_settings
+    instance = settings.dig(:instances, :default)
 
-    expect(settings[:enabled]).to be false
-    expect(settings[:default_model]).to eq('gemini-2.0-flash')
-    expect(settings[:api_key]).to be_nil
-    expect(settings[:model_whitelist]).to eq([])
-    expect(settings[:model_blacklist]).to eq([])
-    expect(settings[:model_cache_ttl]).to eq(3600)
-    expect(settings[:tls]).to eq(enabled: false, verify: :peer)
-    expect(settings[:instances]).to eq({})
+    expect(settings[:enabled]).to be true
+    expect(settings[:provider_family]).to eq(:gemini)
+    expect(instance[:default_model]).to eq('gemini-2.0-flash')
+    expect(instance.dig(:credentials, :api_key)).to eq('env://GEMINI_API_KEY')
+    expect(instance.dig(:fleet, :respond_to_requests)).to be false
+    expect(instance.dig(:usage, :embedding)).to be true
   end
 
   it 'exposes Gemini API base and model listing helpers' do
@@ -112,14 +111,29 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       expect(instances[:settings]).to include(gemini_api_key: 'gk-settings', tier: :cloud)
     end
 
-    it 'discovers named instances from the settings instances sub-key' do
+    it 'normalizes generic settings keys to provider config keys' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :gemini)
-        .and_return({ instances: { staging: { gemini_api_key: 'gk-staging' } } })
+        .and_return({ api_key: 'gk-settings', endpoint: 'https://gemini.example/v1beta' })
 
       instances = described_class.discover_instances
 
-      expect(instances[:staging]).to include(gemini_api_key: 'gk-staging', tier: :cloud)
+      expect(instances[:settings]).to include(gemini_api_key: 'gk-settings',
+                                              gemini_api_base: 'https://gemini.example/v1beta',
+                                              tier: :cloud)
+      expect(instances[:settings]).not_to have_key(:endpoint)
+    end
+
+    it 'discovers named instances from the settings instances sub-key' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :gemini)
+        .and_return({ instances: { staging: { api_key: 'gk-staging', base_url: 'https://staging.example' } } })
+
+      instances = described_class.discover_instances
+
+      expect(instances[:staging]).to include(gemini_api_key: 'gk-staging',
+                                             gemini_api_base: 'https://staging.example',
+                                             tier: :cloud)
     end
 
     it 'deduplicates credentials when env and settings share the same key' do

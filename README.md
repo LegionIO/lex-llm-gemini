@@ -2,7 +2,7 @@
 
 LegionIO LLM provider extension for Google Gemini.
 
-This gem lives under `Legion::Extensions::Llm::Gemini` and depends on `lex-llm` for shared provider-neutral routing, fleet, and schema primitives.
+This gem lives under `Legion::Extensions::Llm::Gemini` and depends on `lex-llm >= 0.4.0` for shared provider-neutral routing, response normalization, fleet envelopes, and schema primitives.
 
 Load it with `require 'legion/extensions/llm/gemini'`.
 
@@ -57,6 +57,25 @@ Legion::Extensions::Llm.configure do |config|
   config.default_model = "gemini-2.0-flash"
   config.default_embedding_model = "gemini-embedding-001"
 end
+```
+
+## Fleet Responder
+
+Provider instances can opt in to consuming Legion LLM fleet requests. The provider-owned fleet actor only starts when at least one configured instance enables `respond_to_requests`.
+
+```yaml
+extensions:
+  llm:
+    gemini:
+      instances:
+        local:
+          fleet:
+            enabled: true
+            respond_to_requests: true
+            capabilities:
+              - chat
+              - stream_chat
+              - embed
 ```
 
 ## Observability
