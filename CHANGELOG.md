@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.3 - 2026-05-06
+
+- Remove require-time provider self-registration; `legion-llm` now owns adapter creation and registry writes from loaded provider discovery metadata.
+- Bump dependency floors to `lex-llm >= 0.4.1` and `legion-llm >= 0.9.1`.
+
 ## 0.3.2 - 2026-05-06
 
 - Add provider contract specs for the shared keyword-only `lex-llm` provider API.
