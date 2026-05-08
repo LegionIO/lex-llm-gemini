@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.8 - 2026-05-08
+
+- Accept keyword arguments in `list_models` to match the base provider contract called by `discover_offerings`.
+
 ## 0.3.7 - 2026-05-07
 
 - Build Gemini content endpoint paths from the canonical model id when callers pass `Model::Info` objects.
