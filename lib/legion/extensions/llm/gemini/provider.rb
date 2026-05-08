@@ -95,7 +95,7 @@ module Legion
             "#{model_path(model)}:embedContent"
           end
 
-          def list_models
+          def list_models(**)
             log.info { 'listing available Gemini models' }
             super.tap do |models|
               log.info { "discovered #{models.size} Gemini model(s); publishing to registry" }
