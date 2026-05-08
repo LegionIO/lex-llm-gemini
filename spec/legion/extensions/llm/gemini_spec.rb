@@ -36,6 +36,10 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(provider.embed_content_url(model: 'gemini-embedding-001')).to eq('models/gemini-embedding-001:embedContent')
   end
 
+  it 'builds Gemini content endpoints from model ids' do
+    expect(provider.generate_content_url(model: flash_model)).to eq(generation_url)
+  end
+
   it 'renders chat payloads in the Gemini generateContent format' do
     payload = chat_payload
 

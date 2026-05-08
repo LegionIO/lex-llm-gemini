@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.7 - 2026-05-07
+
+- Build Gemini content endpoint paths from the canonical model id when callers pass `Model::Info` objects.
+
 ## 0.3.6 - 2026-05-06
 
 - Load provider-owned fleet actors through the LegionIO subscription base and the canonical Gemini provider root.
