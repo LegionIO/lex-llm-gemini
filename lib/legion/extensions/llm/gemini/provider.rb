@@ -106,7 +106,7 @@ module Legion
           private
 
           def model_path(model)
-            value = model.to_s
+            value = model.respond_to?(:id) ? model.id : model.to_s
             value.start_with?('models/') ? value : "models/#{value}"
           end
 
