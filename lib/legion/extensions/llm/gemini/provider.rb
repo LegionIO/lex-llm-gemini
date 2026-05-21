@@ -71,11 +71,11 @@ module Legion
           end
 
           def api_base
-            config.gemini_api_base || 'https://generativelanguage.googleapis.com/v1beta'
+            config.gemini_api_base || settings[:endpoint] || 'https://generativelanguage.googleapis.com/v1beta'
           end
 
           def headers
-            { 'x-goog-api-key' => config.gemini_api_key }
+            identity_headers.merge('x-goog-api-key' => config.gemini_api_key)
           end
 
           def completion_url = generate_content_url(model: @model)
