@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.9 - 2026-05-21
+
+- api_base reads from settings[:endpoint] fallback
+- Identity headers included via base provider
+
+
 ## 0.3.8 - 2026-05-08
 
 - Accept keyword arguments in `list_models` to match the base provider contract called by `discover_offerings`.
