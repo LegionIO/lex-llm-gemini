@@ -70,6 +70,10 @@ module Legion
             end
           end
 
+          def settings
+            Gemini.default_settings
+          end
+
           def api_base
             config.gemini_api_base || settings[:endpoint] || 'https://generativelanguage.googleapis.com/v1beta'
           end
