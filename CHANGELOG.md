@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.10 - 2026-06-02
+
+- Add per-provider scoped discovery refresh actor
+
 ## 0.3.9 - 2026-05-21
 
 - api_base reads from settings[:endpoint] fallback
