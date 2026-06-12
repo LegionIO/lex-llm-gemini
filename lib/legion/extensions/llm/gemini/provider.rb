@@ -187,7 +187,9 @@ module Legion
           end
 
           def tool_call_parts(message)
-            message.tool_calls.values.map do |tool_call|
+            # Array is canonical (name-keyed hashes dropped parallel same-name calls)
+            calls = message.tool_calls.is_a?(Hash) ? message.tool_calls.values : Array(message.tool_calls)
+            calls.map do |tool_call|
               { functionCall: { name: tool_call.name, args: tool_call.arguments } }
             end
           end
