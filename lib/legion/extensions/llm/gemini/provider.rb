@@ -206,9 +206,12 @@ module Legion
           def format_tools(tools)
             [{
               functionDeclarations: tools.values.map do |tool|
-                declaration = { name: tool.name, description: tool.description }
-                declaration[:parameters] = tool.params_schema if tool.params_schema
-                declaration
+                schema = Legion::Extensions::Llm::Canonical::ToolSchema.extract(tool)
+                {
+                  name: Legion::Extensions::Llm::Canonical::ToolSchema.tool_name(tool),
+                  description: Legion::Extensions::Llm::Canonical::ToolSchema.tool_description(tool),
+                  parameters: schema
+                }
               end
             }]
           end
