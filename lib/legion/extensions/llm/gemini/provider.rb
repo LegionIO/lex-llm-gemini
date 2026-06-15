@@ -312,6 +312,95 @@ module Legion
             end
           end
 
+          # -- policy resolution requires many sources
+          def offering_from_model(model, health: {})
+            policy = Legion::Extensions::Llm::CapabilityPolicy.resolve(
+              real: real_capabilities_from(model),
+              provider_catalog: {},
+              probe: {},
+              provider_envelope: {},
+              provider_config: provider_capability_config,
+              instance_config: instance_capability_config,
+              model_config: model_capability_config(model.id)
+            )
+
+            build_model_offering(model, policy, health)
+          end
+
+          def build_model_offering(model, policy, health)
+            Routing::ModelOffering.new(
+              provider_family: slug.to_sym,
+              provider_instance: model.instance || provider_instance_id,
+              transport: offering_transport,
+              tier: offering_tier,
+              model: model.id,
+              canonical_model_alias: model.name,
+              model_family: model.family,
+              usage_type: offering_usage_type(model),
+              capabilities: policy[:capabilities],
+              capability_sources: policy[:sources],
+              limits: offering_limits(model),
+              health:,
+              metadata: offering_metadata(model)
+            )
+          end
+
+          def real_capabilities_from(model)
+            meta = model.respond_to?(:metadata) ? (model.metadata || {}) : {}
+            methods = Array(meta[:supported_generation_methods] || meta['supported_generation_methods'])
+            {
+              streaming: methods.include?('streamGenerateContent'),
+              embeddings: methods.include?('embedContent'),
+              vision: Capabilities.vision?(meta.merge('name' => "models/#{model.id}"))
+            }.compact
+          end
+
+          def provider_capability_config
+            return {} unless defined?(Legion::Extensions::Llm::CredentialSources)
+
+            conf = Legion::Extensions::Llm::CredentialSources.setting(:extensions, :llm, :gemini)
+            conf.is_a?(Hash) ? conf.to_h.except(:instances, 'instances') : {}
+          rescue StandardError => e
+            handle_exception(e, level: :debug, handled: true, operation: 'gemini.provider_capability_config')
+            {}
+          end
+
+          def instance_capability_config
+            cfg = config
+            result = {}
+            %i[capabilities enable_streaming enable_tools enable_thinking enable_vision enable_embeddings
+               thinking_flag tools_flag streaming_flag vision_flag embedding_flag embeddings_flag
+               tool_flag images_flag image_flag].each do |key|
+              next unless cfg.respond_to?(key)
+
+              val = cfg.send(key)
+              result[key] = val unless val.nil?
+            rescue StandardError
+              next
+            end
+            result
+          end
+
+          def model_capability_config(model_id)
+            models_conf = resolve_models_config
+            return {} unless models_conf.respond_to?(:to_h)
+
+            hash = models_conf.to_h
+            hash[model_id.to_s] || hash[model_id.to_sym] || {}
+          rescue StandardError => e
+            handle_exception(e, level: :debug, handled: true, operation: 'gemini.model_capability_config')
+            {}
+          end
+
+          def resolve_models_config
+            return config.models if config.respond_to?(:models)
+            return config[:models] if config.respond_to?(:[])
+
+            nil
+          rescue StandardError
+            nil
+          end
+
           def modalities_for(methods)
             return [%w[text], %w[embeddings]] if methods.include?('embedContent')
 
