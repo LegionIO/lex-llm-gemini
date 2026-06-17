@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.13 - 2026-06-16
+
+- Dependency updates, code quality improvements.
+
 ## 0.3.12 - 2026-06-15
 
 - **CapabilityPolicy integration** — `supportedGenerationMethods` mapped to `:model_metadata`. Settings overrides at provider/instance/model level supported.
