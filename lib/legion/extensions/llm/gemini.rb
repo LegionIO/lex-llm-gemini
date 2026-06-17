@@ -3,6 +3,7 @@
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/gemini/provider'
 require 'legion/extensions/llm/gemini/version'
+require_relative 'gemini/actors/discovery_refresh'
 
 module Legion
   module Extensions
@@ -30,10 +31,7 @@ module Legion
               fleet: {
                 enabled: false,
                 respond_to_requests: false,
-                capabilities: %i[chat stream_chat embed],
-                lanes: [],
-                concurrency: 4,
-                queue_suffix: nil
+                capabilities: %i[chat stream_chat embed tools]
               }
             }
           )
@@ -106,8 +104,7 @@ module Legion
                              :add_settings_api_key, :add_settings_instances, :normalize_instance_config,
                              :sanitize_instance_config
 
-        Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options) if
-          Legion::Extensions::Llm::Configuration.respond_to?(:register_provider_options)
+        Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
       end
     end
   end

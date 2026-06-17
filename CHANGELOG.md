@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.13 - 2026-06-16
+
+- Dependency updates, code quality improvements.
+
+## 0.3.12 - 2026-06-15
+
+- **CapabilityPolicy integration** — `supportedGenerationMethods` mapped to `:model_metadata`. Settings overrides at provider/instance/model level supported.
+
+## 0.3.11 - 2026-06-13
+
+- **Gemfile cleanup** — Remove local path overrides; dependencies resolve from gemspec via rubygems.
+- **Dependency bump** — Require `lex-llm >= 0.5.0` for canonical types support.
+- **Canonical tool support** — Use `ToolSchema.extract` and add `:tools` capability.
+- **Bug fix** — Handle Array tool_calls in `tool_call_parts`.
+- 22 examples, 0 failures; 13 files, 0 rubocop offenses.
+
 ## 0.3.10 - 2026-06-02
 
 - Add per-provider scoped discovery refresh actor
