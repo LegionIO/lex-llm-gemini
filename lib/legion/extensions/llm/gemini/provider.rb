@@ -361,7 +361,7 @@ module Legion
             conf = Legion::Extensions::Llm::CredentialSources.setting(:extensions, :llm, :gemini)
             conf.is_a?(Hash) ? conf.to_h.except(:instances, 'instances') : {}
           rescue StandardError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'gemini.provider_capability_config')
+            handle_exception(e, level: :warn, handled: true, operation: 'gemini.provider_capability_config')
             {}
           end
 
@@ -388,7 +388,7 @@ module Legion
             hash = models_conf.to_h
             hash[model_id.to_s] || hash[model_id.to_sym] || {}
           rescue StandardError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'gemini.model_capability_config')
+            handle_exception(e, level: :warn, handled: true, operation: 'gemini.model_capability_config')
             {}
           end
 
