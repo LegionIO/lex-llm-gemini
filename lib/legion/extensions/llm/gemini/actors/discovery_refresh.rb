@@ -94,7 +94,10 @@ module Legion
               adapter = instance[:adapter]
               return unless adapter.respond_to?(:discover_offerings)
 
-              Array(adapter.discover_offerings(live: false)).each do |offering|
+              Array(adapter.discover_offerings(live: false)).each do |raw_offering|
+                offering = offering_to_hash(raw_offering)
+                next unless offering
+
                 model = offering[:model] || offering['model']
                 next unless model
 
@@ -104,8 +107,18 @@ module Legion
               end
             end
 
+            def offering_to_hash(offering)
+              return nil if offering.nil?
+              return offering if offering.is_a?(Hash)
+
+              hash = offering.to_h
+              hash[:type] ||= hash[:usage_type]
+              hash[:enabled] = offering.respond_to?(:enabled?) ? offering.enabled? : true
+              hash
+            end
+
             def build_lane(offering, instance) # rubocop:disable Metrics/AbcSize,Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity
-              instance_id  = instance[:id] || instance[:instance_id]
+              instance_id  = instance[:instance] || instance[:instance_id] || instance[:id]
               raw_tier     = offering[:tier] || :frontier
               offer_type   = offering[:type]
               type         = %i[embed embedding].include?(offer_type) ? :embedding : :inference
@@ -141,7 +154,7 @@ module Legion
             def fleet_lane(lane, instance)
               fleet_id = Legion::Extensions::Llm::Inventory::ScopedRefresher.compose_id(
                 tier: :fleet, provider_family: :gemini,
-                instance_id: instance[:id] || instance[:instance_id],
+                instance_id: instance[:instance] || instance[:instance_id] || instance[:id],
                 type: lane[:type], model: lane[:model]
               )
               lane.merge(id: fleet_id, tier: :fleet)
