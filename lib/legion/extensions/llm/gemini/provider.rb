@@ -350,7 +350,7 @@ module Legion
             methods = Array(meta[:supported_generation_methods] || meta['supported_generation_methods'])
             {
               streaming: methods.include?('streamGenerateContent'),
-              embeddings: methods.include?('embedContent'),
+              embedding: methods.include?('embedContent'),
               vision: Capabilities.vision?(meta.merge('name' => "models/#{model.id}"))
             }.compact
           end
@@ -366,19 +366,9 @@ module Legion
           end
 
           def instance_capability_config
-            cfg = config
-            result = {}
-            %i[capabilities enable_streaming enable_tools enable_thinking enable_vision enable_embeddings
-               thinking_flag tools_flag streaming_flag vision_flag embedding_flag embeddings_flag
-               tool_flag images_flag image_flag].each do |key|
-              next unless cfg.respond_to?(key)
+            return {} unless config.respond_to?(:to_h)
 
-              val = cfg.send(key)
-              result[key] = val unless val.nil?
-            rescue StandardError
-              next
-            end
-            result
+            config.to_h.slice(*Legion::Extensions::Llm::Provider::CAPABILITY_CONFIG_KEYS)
           end
 
           def model_capability_config(model_id)

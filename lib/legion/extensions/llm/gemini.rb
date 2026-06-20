@@ -69,7 +69,7 @@ module Legion
 
           candidates[:settings] = normalize_instance_config(cfg).merge(api_key: api_key,
                                                                        gemini_api_key: api_key,
-                                                                       tier: :cloud)
+                                                                       tier: cfg[:tier] || cfg['tier'] || :cloud)
         end
 
         def self.add_settings_instances(candidates, cfg)
@@ -83,7 +83,8 @@ module Legion
             next unless normalized[:gemini_api_key]
 
             normalized[:api_key] = normalized[:gemini_api_key]
-            candidates[name.to_sym] = normalized.merge(tier: :cloud)
+            normalized[:tier] ||= :cloud
+            candidates[name.to_sym] = normalized
           end
         end
 

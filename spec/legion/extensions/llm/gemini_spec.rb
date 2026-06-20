@@ -55,8 +55,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   it 'parses Gemini model listings' do
     expect(models.first.to_h).to include(id: 'gemini-2.0-flash', provider: :gemini)
-    expect(models.first.capabilities).to include(:streaming, :function_calling, :vision)
-    expect(models.last.capabilities).to eq([:embeddings])
+    expect(models.first.capabilities).to include(:streaming, :tools, :vision)
+    expect(models.last.capabilities).to eq([:embedding])
     expect(models.last.modalities.to_h).to eq(input: ['text'], output: ['embeddings'])
   end
 
@@ -116,6 +116,16 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       expect(instances[:settings]).to include(gemini_api_key: 'gk-settings', tier: :cloud)
     end
 
+    it 'preserves an explicit tier from extension settings' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :gemini)
+        .and_return({ api_key: 'gk-settings', tier: :private })
+
+      instances = described_class.discover_instances
+
+      expect(instances[:settings]).to include(gemini_api_key: 'gk-settings', tier: :private)
+    end
+
     it 'normalizes generic settings keys to provider config keys' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :gemini)
@@ -141,6 +151,16 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
                                              gemini_api_base: 'https://staging.example',
                                              tier: :cloud)
       expect(instances[:staging]).not_to have_key(:api_key)
+    end
+
+    it 'preserves an explicit tier for named instances' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :gemini)
+        .and_return({ instances: { staging: { api_key: 'gk-staging', tier: :private } } })
+
+      instances = described_class.discover_instances
+
+      expect(instances[:staging]).to include(gemini_api_key: 'gk-staging', tier: :private)
     end
 
     it 'deduplicates credentials when env and settings share the same key' do

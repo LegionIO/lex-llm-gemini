@@ -27,7 +27,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Provider do # rubocop:disable RS
         name: 'Gemini Embedding',
         provider: :gemini,
         context_length: 2048,
-        capabilities: %i[embeddings],
+        capabilities: %i[embedding],
         metadata: {
           supported_generation_methods: %w[embedContent],
           max_output_tokens: 1
@@ -52,8 +52,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Provider do # rubocop:disable RS
       it 'derives embeddings from embedContent with source :model_metadata' do
         offering = provider.send(:offering_from_model, embedding_model)
 
-        expect(offering.capabilities).to include(:embeddings)
-        expect(offering.capability_sources[:embeddings]).to eq({ value: true, source: :model_metadata })
+        expect(offering.capabilities).to include(:embedding)
+        expect(offering.capability_sources[:embedding]).to eq({ value: true, source: :model_metadata })
       end
 
       it 'does not claim streaming for embedding-only models' do
@@ -85,16 +85,18 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Provider do # rubocop:disable RS
         described_class.new(
           gemini_api_key: 'test-key',
           tools_flag: true,
-          vision_flag: true
+          vision_flag: true,
+          enable_structured_output: true
         )
       end
 
-      it 'enables tools and vision via instance config flags' do
+      it 'enables tools, vision, and structured output via instance config flags' do
         offering = provider.send(:offering_from_model, streaming_model)
 
-        expect(offering.capabilities).to include(:tools, :vision)
+        expect(offering.capabilities).to include(:tools, :vision, :structured_output)
         expect(offering.capability_sources[:tools]).to eq({ value: true, source: :instance_override })
         expect(offering.capability_sources[:vision]).to eq({ value: true, source: :instance_override })
+        expect(offering.capability_sources[:structured_output]).to eq({ value: true, source: :instance_override })
       end
     end
 

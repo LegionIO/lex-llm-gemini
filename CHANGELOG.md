@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.15] - 2026-06-20
+
+### Changed
+- Align Gemini instance discovery with the shared `lex-llm` contract by preserving explicit tier overrides while defaulting unconfigured instances to `:cloud`.
+- Expand instance-level capability override passthrough to the shared `enable_*` vocabulary, including `structured_output`.
+- Normalize Gemini contract coverage around canonical `:tools` and `:embedding` capabilities.
+
 ## [0.3.14] - 2026-06-19
 
 ### Changed
