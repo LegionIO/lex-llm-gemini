@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.3.17] - 2026-07-02
+
+### Fixed
+- Emit canonical capability vocabulary (`:embedding`, `:tools`) from `Capabilities.critical_capabilities_for`. `lex-llm` 0.6.1+ retains both the raw and canonical forms on `Model::Info`, so the pre-canonical aliases (`embeddings`, `function_calling`) leaked duplicate tokens (e.g. `[:embeddings, :embedding]`) into discovered model capabilities.
+
+## [0.3.16] - 2026-06-20
+
+### Fixed
+- Stub shared registry publishing through `RegistryPublisher#schedule` in specs so async availability-event coverage stays stable after the shared publisher moved off raw `Thread.new`.
+
+## [0.3.15] - 2026-06-20
+
+### Changed
+- Align Gemini instance discovery with the shared `lex-llm` contract by preserving explicit tier overrides while defaulting unconfigured instances to `:cloud`.
+- Expand instance-level capability override passthrough to the shared `enable_*` vocabulary, including `structured_output`.
+- Normalize Gemini contract coverage around canonical `:tools` and `:embedding` capabilities.
+
+## [0.3.14] - 2026-06-19
+
+### Changed
+- Adopt `Legion::Extensions::Llm::Inventory::ScopedRefresher` mixin (lex-llm 0.6.0). Discovery
+  refresh actors now write directly to the live `Inventory` catalog via `Inventory.write_lane`.
+- Pin `lex-llm >= 0.6.0` and `legion-llm >= 0.14.0` in gemspec.
+- Standard `weight: 100` default added to provider instance settings schema.
+
 ## 0.3.13 - 2026-06-16
 
 - Dependency updates, code quality improvements.
