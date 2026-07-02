@@ -33,11 +33,14 @@ module Legion
             def vision?(model) = chat?(model) && model_id(model).match?(/gemini|flash|pro/)
             def functions?(model) = chat?(model)
 
+            # Emit canonical capability vocabulary (see Legion::Extensions::Llm::Capabilities::CANONICAL).
+            # Model::Info retains both raw and canonical forms, so aliases like :embeddings/:function_calling
+            # would otherwise leak duplicate tokens into the capability list.
             def critical_capabilities_for(model)
               [
                 ('streaming' if streaming?(model)),
-                ('embeddings' if embeddings?(model)),
-                ('function_calling' if functions?(model)),
+                ('embedding' if embeddings?(model)),
+                ('tools' if functions?(model)),
                 ('vision' if vision?(model))
               ].compact
             end

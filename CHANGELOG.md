@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.17] - 2026-07-02
+
+### Fixed
+- Emit canonical capability vocabulary (`:embedding`, `:tools`) from `Capabilities.critical_capabilities_for`. `lex-llm` 0.6.1+ retains both the raw and canonical forms on `Model::Info`, so the pre-canonical aliases (`embeddings`, `function_calling`) leaked duplicate tokens (e.g. `[:embeddings, :embedding]`) into discovered model capabilities.
+
 ## [0.3.16] - 2026-06-20
 
 ### Fixed
