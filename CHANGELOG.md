@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.18] - 2026-08-04
+
+### Changed
+- Prepare the Gemini provider standardization baseline for a patch release.
+
 ## [0.3.17] - 2026-07-02
 
 ### Fixed
