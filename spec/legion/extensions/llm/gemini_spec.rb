@@ -18,7 +18,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(settings[:enabled]).to be true
     expect(settings[:provider_family]).to eq(:gemini)
     expect(instance[:endpoint]).to eq('https://generativelanguage.googleapis.com/v1beta')
-    expect(instance[:default_model]).to eq('gemini-2.0-flash')
+    expect(instance).not_to have_key(:default_model)
     expect(instance.dig(:credentials, :api_key)).to eq('env://GEMINI_API_KEY')
     expect(instance.dig(:fleet, :respond_to_requests)).to be false
     expect(instance.dig(:usage, :embedding)).to be true

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.0] - 2026-08-13
+
+### Changed
+- **SSOT v3 provider migration** - Complete rewrite of the discovery actor to use the
+  Inventory::Publisher/Registry contract. Replaces the old ScopedRefresher/Legion::LLM::Call::Registry
+  discovery mechanism with exact-instance publication via InstanceKey, OfferingDraft snapshots,
+  non-billable readiness probes, and normalized ProviderOutcome error classification.
+- Introduce GeminiCallable wrapper implementing `disconnect` and `normalize_dispatch_error(error:)`
+  contracts required by the SSOT v3 routing layer.
+- Derive instance identity as `host:port/ak:<8-char-SHA256-fingerprint>` for API-key-based isolation.
+- Operation evidence derived from Gemini `supportedGenerationMethods` array (`:provider_catalog` source).
+- Readiness probing via `GET models?pageSize=1` (non-billable, no inference).
+- Support coalesced reactive probes after dispatch-triggered `instance_unavailable` transitions.
+
+### Removed
+- `default_model: 'gemini-2.0-flash'` fallback from provider settings (SSOT v3 requires explicit
+  model selection; no default model or provider inference).
+
+### Dependencies
+- Raise `lex-llm` floor from `>= 0.6.0` to `>= 0.7.0`.
+
 ## [0.3.18] - 2026-08-04
 
 ### Changed

@@ -22,7 +22,7 @@ module Legion
             family: PROVIDER_FAMILY,
             instance: {
               endpoint: 'https://generativelanguage.googleapis.com/v1beta',
-              default_model: 'gemini-2.0-flash',
+              discovery_interval: 3600,
               tier: :frontier,
               transport: :http,
               credentials: { api_key: 'env://GEMINI_API_KEY' },
