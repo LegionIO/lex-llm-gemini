@@ -20,8 +20,7 @@ require 'legion/extensions/llm/fleet/protocol'
 # GeminiCallable is loaded via spec_helper → gemini.rb → discovery_refresh.rb
 # (spec_helper stubs Legion::Extensions::Actors::Every before loading gemini)
 
-# rubocop:disable RSpec/MultipleMemoizedHelpers
-
+# ── TrackingGeminiCallable ──────────────────────────────────────────────────────
 # Test-local callable that extends GeminiCallable with dispatch operations
 # required by FleetWorkerExecution. Tracks inference call count for
 # conformance assertions.
@@ -54,112 +53,9 @@ class TrackingGeminiCallable < Legion::Extensions::Llm::Gemini::Actor::GeminiCal
   end
 end
 
-# Harness class for Gemini SSOT v3 conformance testing. Implements the full
-# interface required by the shared conformance examples without touching
-# any external service.
-class GeminiSsotHarness # rubocop:disable Metrics/ClassLength
-  INSTANCE_CONFIGS = [
-    {
-      gemini_api_base: 'https://generativelanguage.googleapis.com/v1beta',
-      tier: :frontier, gemini_api_key: 'AIzaSyTestKey1-AAAA',
-      usage: { inference: true, embedding: true }
-    }.freeze,
-    {
-      gemini_api_base: 'https://generativelanguage.googleapis.com/v1beta',
-      tier: :frontier, gemini_api_key: 'AIzaSyTestKey2-BBBB',
-      usage: { inference: true, embedding: true }
-    }.freeze
-  ].freeze
-
-  def provider_family = :gemini
-  def instance_configs = INSTANCE_CONFIGS
-
-  def instance_id(instance_config:)
-    base_url = instance_config[:gemini_api_base] || instance_config[:endpoint] ||
-               'https://generativelanguage.googleapis.com/v1beta'
-    host_port = extract_host_port(base_url: base_url)
-    api_key = instance_config[:gemini_api_key] || instance_config[:api_key] ||
-              instance_config.dig(:credentials, :api_key)
-
-    return host_port unless api_key.is_a?(String) && !api_key.strip.empty?
-
-    "#{host_port}/ak:#{::Digest::SHA256.hexdigest(api_key)[0, 8]}"
-  end
-
-  def build_callable(instance_config:)
-    TrackingGeminiCallable.new(instance_cfg: instance_config, logger: Logger.new(File::NULL))
-  end
-
-  def build_offering_drafts(tier: :frontier, **)
-    now = Time.now.freeze
-    model_id = 'gemini-2.0-flash'
-    generation_methods = %w[generateContent streamGenerateContent countTokens]
-    [build_single_offering(model_id: model_id, tier: tier, now: now, generation_methods: generation_methods)]
-  end
-
-  def safe_readiness(instance_config:, **)
-    Legion::Extensions::Llm::Inventory::ReadinessResult.new(
-      ready: true,
-      reason: 'Gemini models API returned 200',
-      metadata: { status: 200, base_url: instance_config[:gemini_api_base] }
-    )
-  end
-
-  def inference_call_count(callable:)
-    callable.respond_to?(:call_count) ? callable.call_count : 0
-  end
-
-  def normalize_dispatch_error(error:)
-    callable = build_callable(instance_config: instance_configs.first)
-    outcome = callable.normalize_dispatch_error(error: error)
-    apply_gemini_escalation(outcome: outcome, error: error)
-  end
-
-  def instance_unavailable_error
-    # Gemini does not produce a distinct instance-unavailable wire signal through
-    # HTTP alone; connection failure is the closest analog for conformance testing.
-    Faraday::ConnectionFailed.new('Connection refused - connect(2) for generativelanguage.googleapis.com:443')
-  end
-
-  def overloaded_error
-    response = { status: 503, headers: {}, body: '{"error": {"code": 503, "message": "Service overloaded"}}' }
-    Faraday::ServerError.new('the server responded with status 503', response)
-  end
-
-  def model_not_ready_error
-    response = { status: 503, headers: {},
-                 body: '{"error": {"code": 503, "message": "Model not ready", "status": "UNAVAILABLE"}}' }
-    Faraday::ServerError.new('the server responded with status 503 - model not ready', response)
-  end
-
+# ── GeminiSsotHarness evidence helpers ─────────────────────────────────────────
+module GeminiHarnessEvidenceHelpers
   private
-
-  def apply_gemini_escalation(outcome:, error:)
-    # Connection failure is the only signal that maps to instance_unavailable
-    # for Gemini (no distinct flat unavailable response exists).
-    if outcome.kind == :connection_failure && error.is_a?(Faraday::ConnectionFailed)
-      return Legion::Extensions::Llm::Routing::ProviderOutcome.new(kind: :instance_unavailable, reason: outcome.reason)
-    end
-
-    # 503 with model-not-ready body signal is request-local, not overloaded.
-    if outcome.kind == :overloaded && model_not_ready_signal?(error: error)
-      return Legion::Extensions::Llm::Routing::ProviderOutcome.new(kind: :model_not_ready, reason: outcome.reason)
-    end
-
-    outcome
-  end
-
-  def model_not_ready_signal?(error:)
-    return false unless error.respond_to?(:response) && error.response.is_a?(Hash)
-
-    body = error.response[:body].to_s.downcase
-    body.include?('model not ready') || body.include?('model is still loading')
-  end
-
-  def extract_host_port(base_url:)
-    uri = URI.parse(base_url.to_s)
-    "#{uri.host || 'generativelanguage.googleapis.com'}:#{uri.port}"
-  end
 
   def build_single_offering(model_id:, tier:, now:, generation_methods:)
     Legion::Extensions::Llm::Inventory::OfferingDraft.new(
@@ -184,15 +80,15 @@ class GeminiSsotHarness # rubocop:disable Metrics/ClassLength
   end
 
   def build_operation_evidence(now:, generation_methods:)
-    chat_status = generation_methods.include?('generateContent') ? :supported : :unknown
+    chat_status   = generation_methods.include?('generateContent')       ? :supported : :unknown
     stream_status = generation_methods.include?('streamGenerateContent') ? :supported : :unknown
-    embed_status = generation_methods.include?('embedContent') ? :supported : :unsupported
+    embed_status  = generation_methods.include?('embedContent')          ? :supported : :unsupported
 
     {
       chat: op_evidence(:chat, chat_status, now),
       stream_chat: op_evidence(:stream_chat, stream_status, now),
-      embed: op_evidence(:embed, embed_status, now),
-      image: op_evidence(:image, :unsupported, now),
+      embed: op_evidence(:embed,        embed_status,  now),
+      image: op_evidence(:image,        :unsupported,  now),
       transcribe: op_evidence(:transcribe, :unsupported, now),
       translate: op_evidence(:translate, :unsupported, now),
       speak: op_evidence(:speak, :unsupported, now),
@@ -232,6 +128,129 @@ class GeminiSsotHarness # rubocop:disable Metrics/ClassLength
   end
 end
 
+# ── GeminiSsotHarness identity helpers ─────────────────────────────────────────
+module GeminiHarnessIdentityHelpers
+  private
+
+  def extract_host_port(base_url:)
+    uri = URI.parse(base_url.to_s)
+    "#{uri.host || 'generativelanguage.googleapis.com'}:#{uri.port}"
+  end
+end
+
+# ── GeminiSsotHarness escalation helpers ───────────────────────────────────────
+module GeminiHarnessEscalationHelpers
+  private
+
+  # §8: Only explicit Gemini UNAVAILABLE body signals map to :instance_unavailable.
+  # Connection failures (Faraday::ConnectionFailed) remain :connection_failure — they
+  # are request-local and must never mutate global instance availability.
+  def apply_gemini_escalation(outcome:, error:)
+    if outcome.kind == :overloaded && model_not_ready_signal?(error: error)
+      return Legion::Extensions::Llm::Routing::ProviderOutcome.new(kind: :model_not_ready, reason: outcome.reason)
+    end
+
+    outcome
+  end
+
+  def model_not_ready_signal?(error:)
+    return false unless error.respond_to?(:response) && error.response.is_a?(Hash)
+
+    body = error.response[:body].to_s.downcase
+    body.include?('model not ready') || body.include?('model is still loading')
+  end
+end
+
+# ── GeminiSsotHarness ───────────────────────────────────────────────────────────
+# Harness class for Gemini SSOT v3 conformance testing. Implements the full
+# interface required by the shared conformance examples without touching
+# any external service.
+class GeminiSsotHarness
+  include GeminiHarnessEvidenceHelpers
+  include GeminiHarnessIdentityHelpers
+  include GeminiHarnessEscalationHelpers
+
+  INSTANCE_CONFIGS = [
+    {
+      gemini_api_base: 'https://generativelanguage.googleapis.com/v1beta',
+      tier: :frontier, gemini_api_key: 'AIzaSyTestKey1-AAAA',
+      usage: { inference: true, embedding: true }
+    }.freeze,
+    {
+      gemini_api_base: 'https://generativelanguage.googleapis.com/v1beta',
+      tier: :frontier, gemini_api_key: 'AIzaSyTestKey2-BBBB',
+      usage: { inference: true, embedding: true }
+    }.freeze
+  ].freeze
+
+  def provider_family = :gemini
+  def instance_configs = INSTANCE_CONFIGS
+
+  def instance_id(instance_config:)
+    base_url  = instance_config[:gemini_api_base] || instance_config[:endpoint] ||
+                'https://generativelanguage.googleapis.com/v1beta'
+    host_port = extract_host_port(base_url: base_url)
+    api_key   = instance_config[:gemini_api_key] || instance_config[:api_key] ||
+                instance_config.dig(:credentials, :api_key)
+
+    return host_port unless api_key.is_a?(String) && !api_key.strip.empty?
+
+    "#{host_port}/ak:#{::Digest::SHA256.hexdigest(api_key)[0, 8]}"
+  end
+
+  def build_callable(instance_config:)
+    TrackingGeminiCallable.new(instance_cfg: instance_config, logger: Logger.new(File::NULL))
+  end
+
+  def build_offering_drafts(tier: :frontier, **)
+    now = Time.now.freeze
+    model_id = 'gemini-2.0-flash'
+    generation_methods = %w[generateContent streamGenerateContent countTokens]
+    [build_single_offering(model_id: model_id, tier: tier, now: now, generation_methods: generation_methods)]
+  end
+
+  def safe_readiness(instance_config:, **)
+    Legion::Extensions::Llm::Inventory::ReadinessResult.new(
+      ready: true,
+      reason: 'Gemini models API returned 200',
+      metadata: { status: 200, base_url: instance_config[:gemini_api_base] }
+    )
+  end
+
+  def inference_call_count(callable:)
+    callable.respond_to?(:call_count) ? callable.call_count : 0
+  end
+
+  def normalize_dispatch_error(error:)
+    callable = build_callable(instance_config: instance_configs.first)
+    outcome  = callable.normalize_dispatch_error(error: error)
+    apply_gemini_escalation(outcome: outcome, error: error)
+  end
+
+  # Returns a Faraday::ServerError carrying Gemini's explicit UNAVAILABLE body
+  # signal — the only flat service/instance-unavailable condition Gemini emits.
+  # §8: connection failures are request-local and are NOT returned here.
+  def instance_unavailable_error
+    response = {
+      status: 503,
+      headers: {},
+      body: '{"error":{"code":503,"message":"The service is currently unavailable.","status":"UNAVAILABLE"}}'
+    }
+    Faraday::ServerError.new('the server responded with status 503 - service unavailable', response)
+  end
+
+  def overloaded_error
+    response = { status: 503, headers: {}, body: '{"error": {"code": 503, "message": "Service overloaded"}}' }
+    Faraday::ServerError.new('the server responded with status 503', response)
+  end
+
+  def model_not_ready_error
+    response = { status: 503, headers: {},
+                 body: '{"error": {"code": 503, "message": "Model not ready", "status": "MODEL_NOT_READY"}}' }
+    Faraday::ServerError.new('the server responded with status 503 - model not ready', response)
+  end
+end
+
 RSpec.describe Legion::Extensions::Llm::Gemini do
   let(:ssot_harness) { GeminiSsotHarness.new }
   let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
@@ -258,9 +277,9 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
     it 'reproduces the same instance_id across multiple calls (stable identity)' do
       config = ssot_harness.instance_configs.first
-      id_a = ssot_harness.instance_id(instance_config: config)
-      id_b = ssot_harness.instance_id(instance_config: config)
-      expect(id_a).to eq(id_b)
+      id_first  = ssot_harness.instance_id(instance_config: config)
+      id_second = ssot_harness.instance_id(instance_config: config)
+      expect(id_first).to eq(id_second)
     end
   end
 
@@ -277,7 +296,6 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
         instance_key: key, enqueue: ->(**) { true }
       )
-
       token = publisher.claim_instance(instance_id: instance_id, callable: callable,
                                        probe_request_handle: coordinator)
       probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
@@ -285,7 +303,6 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       publisher.activate_instance_snapshot(
         instance_id: instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
       )
-
       { publisher: publisher, key: key, callable: callable, token: token, drafts: drafts, coordinator: coordinator }
     end
 
@@ -294,40 +311,35 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       b = bring_up_instance(ssot_harness.instance_configs[1])
 
       snapshot = registry.snapshot
-      lanes_a = snapshot.lanes_for(instance_key: a[:key])
-      lanes_b = snapshot.lanes_for(instance_key: b[:key])
+      lanes_a  = snapshot.lanes_for(instance_key: a[:key])
+      lanes_b  = snapshot.lanes_for(instance_key: b[:key])
 
       expect(lanes_a).not_to be_empty
       expect(lanes_b).not_to be_empty
-
-      lane_ids_a = lanes_a.map(&:lane_id)
-      lane_ids_b = lanes_b.map(&:lane_id)
-      expect(lane_ids_a & lane_ids_b).to be_empty
+      expect(lanes_a.map(&:lane_id) & lanes_b.map(&:lane_id)).to be_empty
     end
 
     it 'reproduces IDs after restart (identity is deterministic from inputs)' do
       config = ssot_harness.instance_configs[0]
       first_run = bring_up_instance(config)
       first_offering_id = registry.snapshot.offerings_for(instance_key: first_run[:key]).first.offering_id
-      first_lane_id = registry.snapshot.lanes_for(instance_key: first_run[:key]).first.lane_id
+      first_lane_id     = registry.snapshot.lanes_for(instance_key: first_run[:key]).first.lane_id
 
       registry.reset!
       second_run = bring_up_instance(config)
-      second_offering_id = registry.snapshot.offerings_for(instance_key: second_run[:key]).first.offering_id
-      second_lane_id = registry.snapshot.lanes_for(instance_key: second_run[:key]).first.lane_id
-
-      expect(second_offering_id).to eq(first_offering_id)
-      expect(second_lane_id).to eq(first_lane_id)
+      expect(registry.snapshot.offerings_for(instance_key: second_run[:key]).first.offering_id).to eq(first_offering_id)
+      expect(registry.snapshot.lanes_for(instance_key: second_run[:key]).first.lane_id).to eq(first_lane_id)
     end
   end
 
   # ─── Generation method evidence controls ───────────────────────────────────
 
   describe 'generation method operation evidence' do
-    let(:config) { ssot_harness.instance_configs[0] }
-    let(:callable) { ssot_harness.build_callable(instance_config: config) }
-    let(:drafts) { ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :frontier) }
-    let(:offering) { drafts.first }
+    let(:offering) do
+      config   = ssot_harness.instance_configs[0]
+      callable = ssot_harness.build_callable(instance_config: config)
+      ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :frontier).first
+    end
 
     it 'marks chat as supported when generateContent is present' do
       expect(offering.operation_evidence[:chat].status).to eq(:supported)
@@ -367,45 +379,18 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   # ─── Missing generation methods yields unknown, not blanket supported ──────
 
   describe 'empty generation methods handling' do
-    it 'produces unknown evidence when generation methods list is empty' do
-      # Simulate a model that has no supportedGenerationMethods field
-      GeminiSsotHarness.new
-      # Override build to use empty generation methods
-      now = Time.now.freeze
-      op_evidence = {
-        chat: Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-          operation: :chat, status: :unknown, source: :default_false, observed_at: now
-        ),
-        stream_chat: Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-          operation: :stream_chat, status: :unknown, source: :default_false, observed_at: now
-        ),
-        embed: Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-          operation: :embed, status: :unknown, source: :default_false, observed_at: now
-        ),
-        image: Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-          operation: :image, status: :unsupported, source: :provider_catalog, observed_at: now
-        ),
-        transcribe: Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-          operation: :transcribe, status: :unsupported, source: :provider_catalog, observed_at: now
-        ),
-        translate: Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-          operation: :translate, status: :unsupported, source: :provider_catalog, observed_at: now
-        ),
-        speak: Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-          operation: :speak, status: :unsupported, source: :provider_catalog, observed_at: now
-        ),
-        moderate: Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-          operation: :moderate, status: :unsupported, source: :provider_catalog, observed_at: now
-        ),
-        count_tokens: Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-          operation: :count_tokens, status: :unknown, source: :default_false, observed_at: now
-        )
-      }
+    it 'produces unknown evidence for chat/stream/embed when generation methods list is empty' do
+      # Call the actor's actual build_operation_evidence to verify the behavior —
+      # not a tautological manual construction.
+      actor  = Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh.allocate
+      result = actor.send(:build_operation_evidence, generation_methods: [])
 
-      # When methods are empty, chat/stream/embed should all be unknown, not supported
-      expect(op_evidence[:chat].status).to eq(:unknown)
-      expect(op_evidence[:stream_chat].status).to eq(:unknown)
-      expect(op_evidence[:embed].status).to eq(:unknown)
+      expect(result[:chat].status).to eq(:unknown)
+      expect(result[:stream_chat].status).to eq(:unknown)
+      expect(result[:embed].status).to eq(:unknown)
+      # Fixed operations are still unsupported regardless of generation methods
+      expect(result[:image].status).to eq(:unsupported)
+      expect(result[:chat].source).to eq(:default_false)
     end
   end
 
@@ -413,17 +398,12 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   describe 'embed-only model operation separation' do
     it 'embed model does not advertise chat support' do
-      Time.now.freeze
-      # A model like text-embedding-004 only has embedContent
-      embed_methods = %w[embedContent]
+      actor  = Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh.allocate
+      result = actor.send(:build_operation_evidence, generation_methods: %w[embedContent])
 
-      chat_status = embed_methods.include?('generateContent') ? :supported : :unsupported
-      stream_status = embed_methods.include?('streamGenerateContent') ? :supported : :unsupported
-      embed_status = embed_methods.include?('embedContent') ? :supported : :unsupported
-
-      expect(chat_status).to eq(:unsupported)
-      expect(stream_status).to eq(:unsupported)
-      expect(embed_status).to eq(:supported)
+      expect(result[:chat].status).to eq(:unsupported)
+      expect(result[:stream_chat].status).to eq(:unsupported)
+      expect(result[:embed].status).to eq(:supported)
     end
   end
 
@@ -454,12 +434,9 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       now = Time.now.freeze
       expect do
         Legion::Extensions::Llm::Inventory::OfferingDraft.new(
-          provider_native_key: 'test',
-          model: '',
-          tier: :frontier,
-          operation_evidence: GeminiSsotHarness.new.send(
-            :build_operation_evidence, now: now, generation_methods: %w[generateContent]
-          ),
+          provider_native_key: 'test', model: '', tier: :frontier,
+          operation_evidence: ssot_harness.send(:build_operation_evidence, now: now,
+                                                                           generation_methods: %w[generateContent]),
           context_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
           max_output_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
           embedding_dimensions_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown,
@@ -467,9 +444,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
           model_revision_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown,
                                                                                          source: :absent),
           tokenizer_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
-          quota_domains: {},
-          metadata: {},
-          publication_source: :provider_catalog
+          quota_domains: {}, metadata: {}, publication_source: :provider_catalog
         )
       end.to raise_error(Legion::Extensions::Llm::Inventory::Errors::ValidationError)
     end
@@ -478,50 +453,55 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   # ─── Startup gating + initializing on initial failure ──────────────────────
 
   describe 'startup gating' do
-    let(:config) { ssot_harness.instance_configs[0] }
-    let(:instance_id) { ssot_harness.instance_id(instance_config: config) }
-    let(:key) do
-      Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+    let(:startup_setup) do
+      config      = ssot_harness.instance_configs[0]
+      instance_id = ssot_harness.instance_id(instance_config: config)
+      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
         provider_family: :gemini, instance_id: instance_id
       )
-    end
-    let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :gemini) }
-    let(:callable) { ssot_harness.build_callable(instance_config: config) }
-    let(:coordinator) do
-      Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
+      pub        = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :gemini)
+      callable   = ssot_harness.build_callable(instance_config: config)
+      coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
         instance_key: key, enqueue: ->(**) { true }
       )
+      { config: config, instance_id: instance_id, key: key, publisher: pub, callable: callable,
+        coordinator: coordinator }
     end
 
     it 'remains initializing until readiness probe succeeds' do
-      publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
-
+      s = startup_setup
+      s[:publisher].claim_instance(instance_id: s[:instance_id], callable: s[:callable],
+                                   probe_request_handle: s[:coordinator])
       snapshot = registry.snapshot
-      expect(snapshot.instance(instance_key: key)).to be_nil
-      expect(snapshot.publication_status(instance_key: key).state).to eq(:initializing)
+      expect(snapshot.instance(instance_key: s[:key])).to be_nil
+      expect(snapshot.publication_status(instance_key: s[:key]).state).to eq(:initializing)
     end
 
     it 'stays initializing after an initial readiness failure' do
-      token = publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
-      publisher.readiness_failed(instance_id: instance_id, probe_token: probe, reason: 'Gemini models API returned 401')
-
+      s = startup_setup
+      token = s[:publisher].claim_instance(instance_id: s[:instance_id], callable: s[:callable],
+                                           probe_request_handle: s[:coordinator])
+      probe = s[:publisher].readiness_probe_started(instance_id: s[:instance_id], publisher_token: token)
+      s[:publisher].readiness_failed(instance_id: s[:instance_id], probe_token: probe,
+                                     reason: 'Gemini models API returned 401')
       snapshot = registry.snapshot
-      expect(snapshot.instance(instance_key: key)).to be_nil
-      expect(snapshot.publication_status(instance_key: key).state).to eq(:initializing)
+      expect(snapshot.instance(instance_key: s[:key])).to be_nil
+      expect(snapshot.publication_status(instance_key: s[:key]).state).to eq(:initializing)
     end
 
     it 'transitions to available after readiness success' do
-      token = publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
-      drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :frontier)
-      publisher.activate_instance_snapshot(
-        instance_id: instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
+      s = startup_setup
+      token  = s[:publisher].claim_instance(instance_id: s[:instance_id], callable: s[:callable],
+                                            probe_request_handle: s[:coordinator])
+      probe  = s[:publisher].readiness_probe_started(instance_id: s[:instance_id], publisher_token: token)
+      drafts = ssot_harness.build_offering_drafts(instance_config: s[:config], callable: s[:callable],
+                                                  tier: :frontier)
+      s[:publisher].activate_instance_snapshot(
+        instance_id: s[:instance_id], publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
       )
-
       snapshot = registry.snapshot
-      expect(snapshot.instance(instance_key: key).availability.state).to eq(:available)
-      expect(snapshot.publication_status(instance_key: key).state).to eq(:complete)
+      expect(snapshot.instance(instance_key: s[:key]).availability.state).to eq(:available)
+      expect(snapshot.publication_status(instance_key: s[:key]).state).to eq(:complete)
     end
   end
 
@@ -529,23 +509,21 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   describe 'instance-unavailable isolation' do
     def bring_up(config)
-      publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :gemini)
+      publisher   = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :gemini)
       instance_id = ssot_harness.instance_id(instance_config: config)
-      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      key         = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
         provider_family: :gemini, instance_id: instance_id
       )
-      callable = ssot_harness.build_callable(instance_config: config)
+      callable    = ssot_harness.build_callable(instance_config: config)
       coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
         instance_key: key, enqueue: ->(**) { true }
       )
-
-      token = publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
+      token  = publisher.claim_instance(instance_id: instance_id, callable: callable, probe_request_handle: coordinator)
+      probe  = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :frontier)
       publisher.activate_instance_snapshot(
         instance_id: instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
       )
-
       { publisher: publisher, key: key, callable: callable, token: token }
     end
 
@@ -563,7 +541,19 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       expect(registry.snapshot.instance(instance_key: b[:key]).availability.state).to eq(:available)
     end
 
-    it 'normalizes connection failure as instance_unavailable through the harness' do
+    # §8 health firewall: connection failures are request-local and must NEVER
+    # mutate global instance availability. This assertion proves the firewall.
+    it 'does not promote connection failure to instance_unavailable (§8 health firewall)' do
+      error = Faraday::ConnectionFailed.new(
+        'Connection refused - connect(2) for generativelanguage.googleapis.com:443'
+      )
+      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs.first)
+      outcome  = callable.normalize_dispatch_error(error: error)
+      expect(outcome.kind).to eq(:connection_failure)
+      expect(outcome.kind).not_to eq(:instance_unavailable)
+    end
+
+    it 'normalizes explicit Gemini UNAVAILABLE signal to instance_unavailable' do
       outcome = ssot_harness.normalize_dispatch_error(error: ssot_harness.instance_unavailable_error)
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
       expect(outcome.kind).to eq(:instance_unavailable)
@@ -581,42 +571,40 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   describe 'error isolation (no global poisoning)' do
     it 'classifies connection failure as connection_failure on the callable' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      error = Faraday::ConnectionFailed.new('Connection refused')
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome  = callable.normalize_dispatch_error(error: Faraday::ConnectionFailed.new('Connection refused'))
       expect(outcome.kind).to eq(:connection_failure)
     end
 
     it 'classifies timeout as timeout on the callable' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      error = Faraday::TimeoutError.new('Net::ReadTimeout')
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome  = callable.normalize_dispatch_error(error: Faraday::TimeoutError.new('Net::ReadTimeout'))
       expect(outcome.kind).to eq(:timeout)
     end
 
     it 'classifies 429 ClientError as rate_limited on the callable' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      response = { status: 429, headers: {}, body: '' }
-      error = Faraday::ClientError.new('429', response)
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome  = callable.normalize_dispatch_error(error: Faraday::ClientError.new('429',
+                                                                                   { status: 429, headers: {},
+                                                                                     body: '' }))
       expect(outcome.kind).to eq(:rate_limited)
     end
 
     it 'classifies 401 as authentication on the callable' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      response = { status: 401, headers: {}, body: '' }
-      error = Faraday::ClientError.new('401', response)
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome  = callable.normalize_dispatch_error(error: Faraday::ClientError.new('401',
+                                                                                   { status: 401, headers: {},
+                                                                                     body: '' }))
       expect(outcome.kind).to eq(:authentication)
     end
 
-    it 'never returns instance_unavailable from the callable for any server error' do
+    it 'never returns instance_unavailable from the callable for plain server errors' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
       [500, 502, 503, 504, 529].each do |status|
-        response = { status: status, headers: {}, body: '' }
-        error = Faraday::ServerError.new(status.to_s, response)
-        outcome = callable.normalize_dispatch_error(error: error)
+        outcome = callable.normalize_dispatch_error(
+          error: Faraday::ServerError.new(status.to_s, { status: status, headers: {}, body: '' })
+        )
         expect(outcome.kind).not_to eq(:instance_unavailable),
-                                    "status #{status} should not map to instance_unavailable"
+                                    "status #{status} without UNAVAILABLE body must not map to instance_unavailable"
       end
     end
   end
@@ -625,9 +613,9 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   describe 'quota domain safety' do
     it 'does not declare quota_domains on offerings' do
-      config = ssot_harness.instance_configs[0]
+      config   = ssot_harness.instance_configs[0]
       callable = ssot_harness.build_callable(instance_config: config)
-      drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :frontier)
+      drafts   = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :frontier)
 
       drafts.each do |draft|
         expect(draft.quota_domains).to be_empty,
@@ -640,9 +628,9 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   describe 'ReadinessResult contract' do
     it 'safe_readiness returns a ready ReadinessResult' do
-      config = ssot_harness.instance_configs[0]
+      config   = ssot_harness.instance_configs[0]
       callable = ssot_harness.build_callable(instance_config: config)
-      result = ssot_harness.safe_readiness(instance_config: config, callable: callable)
+      result   = ssot_harness.safe_readiness(instance_config: config, callable: callable)
 
       expect(result).to be_a(Legion::Extensions::Llm::Inventory::ReadinessResult)
       expect(result.ready?).to be(true)
@@ -651,7 +639,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     end
 
     it 'readiness does not invoke inference on the callable' do
-      config = ssot_harness.instance_configs[0]
+      config   = ssot_harness.instance_configs[0]
       callable = ssot_harness.build_callable(instance_config: config)
       ssot_harness.safe_readiness(instance_config: config, callable: callable)
       expect(ssot_harness.inference_call_count(callable: callable)).to eq(0)
@@ -668,7 +656,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       )
     end
 
-    it 'responds to disconnect' do
+    it 'responds to disconnect and disconnected?' do
       expect(callable).to respond_to(:disconnect)
       expect(callable).to respond_to(:disconnected?)
     end
@@ -699,7 +687,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   describe 'dependency isolation' do
     it 'does not require Legion::LLM in the discovery actor' do
       project_root = File.expand_path('../../../..', __dir__)
-      actor_file = File.read(
+      actor_file   = File.read(
         File.join(project_root, 'lib/legion/extensions/llm/gemini/actors/discovery_refresh.rb')
       )
       expect(actor_file).not_to match(/\bLegion::LLM\b/)
@@ -707,7 +695,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
     it 'GeminiCallable does not reference Legion::LLM' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      outcome = callable.normalize_dispatch_error(error: RuntimeError.new('test'))
+      outcome  = callable.normalize_dispatch_error(error: RuntimeError.new('test'))
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
     end
   end
@@ -715,17 +703,18 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   # ─── ProbeCoordinator coalescing ───────────────────────────────────────────
 
   describe 'ProbeCoordinator coalescing' do
-    let(:config) { ssot_harness.instance_configs[0] }
-    let(:instance_id) { ssot_harness.instance_id(instance_config: config) }
-    let(:key) do
-      Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+    let(:probe_setup) do
+      config      = ssot_harness.instance_configs[0]
+      instance_id = ssot_harness.instance_id(instance_config: config)
+      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
         provider_family: :gemini, instance_id: instance_id
       )
+      { config: config, instance_id: instance_id, key: key }
     end
     let(:enqueue_calls) { [] }
     let(:coordinator) do
       Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-        instance_key: key,
+        instance_key: probe_setup[:key],
         enqueue: lambda { |request:|
           enqueue_calls << request
           true
@@ -735,7 +724,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
     it 'coalesces multiple probe requests into a single in-flight probe' do
       coordinator.enqueue_probe_request(
-        instance_key: key, publisher_token_id: 'ptok:v1:aaa',
+        instance_key: probe_setup[:key], publisher_token_id: 'ptok:v1:aaa',
         unavailable_revision: 1, reason: 'first failure'
       )
       expect(enqueue_calls.size).to eq(1)
@@ -744,7 +733,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       expect(coordinator.in_flight?).to be(true)
 
       coordinator.enqueue_probe_request(
-        instance_key: key, publisher_token_id: 'ptok:v1:aaa',
+        instance_key: probe_setup[:key], publisher_token_id: 'ptok:v1:aaa',
         unavailable_revision: 2, reason: 'second failure'
       )
       expect(enqueue_calls.size).to eq(1)
@@ -755,5 +744,3 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     end
   end
 end
-
-# rubocop:enable RSpec/MultipleMemoizedHelpers

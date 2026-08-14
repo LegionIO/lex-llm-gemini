@@ -105,8 +105,7 @@ module Legion
           def list_models(**)
             log.info { 'listing available Gemini models' }
             super.tap do |models|
-              log.info { "discovered #{models.size} Gemini model(s); publishing to registry" }
-              self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
+              log.info { "discovered #{models.size} Gemini model(s)" }
             end
           end
 

@@ -60,13 +60,14 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(models.last.modalities.to_h).to eq(input: ['text'], output: ['embeddings'])
   end
 
-  it 'publishes discovered models asynchronously through the base registry publisher' do
+  it 'lists discovered models without invoking the legacy registry publisher (§2 single engine)' do
     stub_registry_publisher
     stub_model_discovery
 
     models = provider.list_models
 
-    expect_registry_publish(models)
+    expect(models).not_to be_empty
+    expect(registry_publisher).not_to have_received(:publish_models_async)
   end
 
   it 'builds sanitized lex-llm registry events for Gemini model availability' do

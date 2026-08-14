@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.4.1] - 2026-08-13
+
+### Fixed
+- **§8 health firewall**: `GeminiCallable#normalize_dispatch_error` now maps only an explicit
+  Gemini `"status":"UNAVAILABLE"` response body to `:instance_unavailable`. Connection failures,
+  timeouts, generic 5xx, 429, auth, and all other transient errors remain request-local and never
+  mutate global instance availability.
+- **§2 single publication engine**: Removed legacy `RegistryPublisher#publish_models_async` call
+  from `Provider#list_models`. Discovery actor via `Inventory::Publisher` is now the sole
+  publication path.
+- **§1 settings guards**: Replaced `settings[:discovery_interval] || self.class.every_seconds`,
+  `settings.dig(:credentials, :api_key)`, `settings[:endpoint] || ...`, and `settings[:tier] || ...`
+  with direct registered-default access (`settings[:key]`).
+- **§1 rubocop disables**: Removed all inline rubocop:disable annotations; resolved underlying
+  `Metrics/ClassLength` by extracting private methods into helper modules
+  (`EvidenceBuilder`, `ValueEvidenceBuilder`, `ModelDiscovery`, `ConfigResolver`, `HttpClient`,
+  `ProbeRunner`, `HealthChecker`, `InstanceLifecycle`); resolved `Metrics/AbcSize` on
+  `claim_and_activate_instance` by splitting into focused helpers; resolved swallowed
+  `rescue nil` patterns in `run_cadence_probe` and `handle_reactive_probe` with proper
+  `begin/rescue/handle_exception` blocks.
+- **§11 conformance spec**: Replaced tautological `empty generation methods` test with a real
+  assertion that calls the actor's `build_operation_evidence` method directly.
+
 ## [0.4.0] - 2026-08-13
 
 ### Changed
