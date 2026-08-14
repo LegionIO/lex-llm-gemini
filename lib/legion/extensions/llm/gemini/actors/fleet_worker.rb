@@ -2,8 +2,8 @@
 
 begin
   require 'legion/extensions/actors/subscription'
-rescue LoadError => e
-  warn(e.message) if $VERBOSE
+rescue LoadError
+  nil
 end
 
 unless defined?(Legion::Extensions::Actors::Subscription)

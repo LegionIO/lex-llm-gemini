@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.4.2] - 2026-08-13
+
+### Fixed
+- **§1 rubocop disables — second remediation pass**: Removed all remaining inline
+  `# rubocop:disable` directives from `provider.rb`, `gemini.rb`, and spec files.
+  Resolved `Metrics/ClassLength` by extracting `MessageFormatter`, `ResponseParser`, and
+  `OfferingBuilder` as sibling modules outside the `Provider` class body; resolved
+  `Metrics/ParameterLists`/`Lint/UnusedMethodArgument` on `render_payload` by switching to
+  `**opts` with explicit `fetch`/`[]` extraction and splitting assembly into `build_request_payload`;
+  resolved `Metrics/AbcSize` on `normalize_instance_config` by extracting `symbolize_config_keys`,
+  `promote_api_key`, and `promote_api_base` helpers.
+- **§1 spec file path format**: Moved `capability_policy_spec.rb` to
+  `provider_capability_policy_spec.rb` and `actors/fleet_worker_spec.rb` to
+  `actor/fleet_worker_spec.rb` so paths satisfy `RSpec/SpecFilePathFormat`.
+- **§provider-plan blanket chat support**: `Capabilities#supported?` no longer returns `true`
+  for all non-embedding actions when `supportedGenerationMethods` is empty; an absent method
+  list is now treated as unknown/unsupported for all actions except the embedding name heuristic.
+- **§2 second publication engine removed**: Deleted `registry_publisher` class method and
+  `attr_writer :registry_publisher` from `Provider`; removed all associated spec assertions.
+- **§1 settings guards**: Removed chained `||` fallback in `api_base`; removed `defined?`
+  guard in `provider_capability_config`; removed `respond_to?` guards in
+  `instance_capability_config`, `model_capability_config`, and `resolve_models_config`.
+- **§1 swallowed rescues**: All `rescue` blocks in `provider.rb` and `discovery_refresh.rb`
+  now call `handle_exception`; removed silent `rescue StandardError; nil` in
+  `resolve_models_config`; `extract_host_port` and `check_health` rescue blocks now log via
+  `handle_exception` before returning degraded values.
+- **§1 stdlib warn**: Replaced `warn(e.message) if $VERBOSE` in `LoadError` rescue blocks
+  with silent rescues (the error is not actionable at file-load time and the defined-guard
+  below provides the correct gating behavior).
+
 ## [0.4.1] - 2026-08-13
 
 ### Fixed

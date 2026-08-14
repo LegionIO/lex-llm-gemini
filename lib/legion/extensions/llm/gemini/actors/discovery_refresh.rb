@@ -5,8 +5,8 @@ require 'uri'
 
 begin
   require 'legion/extensions/actors/every'
-rescue LoadError => e
-  warn(e.message) if $VERBOSE
+rescue LoadError
+  nil
 end
 
 require 'legion/extensions/llm/inventory/publisher'
@@ -332,7 +332,8 @@ module Legion
               uri  = URI.parse(url.to_s)
               host = uri.host || 'generativelanguage.googleapis.com'
               "#{host}:#{uri.port}"
-            rescue URI::InvalidURIError
+            rescue URI::InvalidURIError => e
+              handle_exception(e, level: :warn, operation: 'gemini.actor.extract_host_port', url: url.to_s)
               'unknown:0'
             end
           end
@@ -413,8 +414,11 @@ module Legion
               response = conn.get('models', { pageSize: 1 })
               build_readiness_from_response(response: response, base_url: base_url)
             rescue Faraday::ConnectionFailed => e
+              handle_exception(e, level: :warn, operation: 'gemini.actor.check_health.connection',
+                                  base_url: base_url)
               readiness_failure(reason: "Gemini models API connection failed: #{e.message}", error: e)
             rescue StandardError => e
+              handle_exception(e, level: :warn, operation: 'gemini.actor.check_health', base_url: base_url)
               readiness_failure(reason: "Gemini models API error: #{e.message}", error: e)
             end
 
