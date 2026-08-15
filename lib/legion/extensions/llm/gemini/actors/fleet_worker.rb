@@ -11,6 +11,7 @@ unless defined?(Legion::Extensions::Actors::Subscription)
 end
 
 require 'legion/extensions/llm/gemini'
+require 'legion/extensions/llm/gemini/runners/fleet_worker'
 require 'legion/extensions/llm/fleet/provider_responder'
 
 module Legion
@@ -20,8 +21,11 @@ module Legion
         module Actor
           # Subscription actor for Gemini fleet request consumption.
           class FleetWorker < Legion::Extensions::Actors::Subscription
+            # The Subscription dispatch path (use_runner? == false) calls
+            # runner_class.send(fn, **message) — a String cannot be send-ed,
+            # so the runner must be the resolved module constant.
             def runner_class
-              'Legion::Extensions::Llm::Gemini::Runners::FleetWorker'
+              Legion::Extensions::Llm::Gemini::Runners::FleetWorker
             end
 
             def runner_function

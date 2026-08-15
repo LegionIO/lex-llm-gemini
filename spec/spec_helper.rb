@@ -5,8 +5,9 @@ require 'logger'
 
 require 'legion/extensions/llm'
 
-# Stub the actor runtime before loading Gemini (discovery_refresh.rb guards
-# on defined?(Legion::Extensions::Actors::Every) at load time).
+# Stub the LegionIO host-runtime pieces that are not available in the provider
+# gem's spec environment before loading Gemini (the production host always
+# loads them; a missing runtime must fail loud at require time, not here).
 module Legion
   module Extensions
     module Actors
@@ -20,36 +21,32 @@ module Legion
     module Helpers
       module Lex; end unless const_defined?(:Lex, false)
     end
+
+    module Core; end unless const_defined?(:Core, false)
   end
 end
 
 require 'legion/extensions/llm/gemini'
 
-# Load conformance kit from lex-llm gem's spec/ directory
-# (spec/ ships in the gem but is NOT on the load path)
+# Load the SSOT v3 shared example group from the lex-llm gem's spec/ directory
+# (spec/ ships in the gem but is NOT on the load path). Only the example-group
+# file — the kit directory also contains lex-llm's own self-test specs, which
+# must not run inside a provider gem's suite.
 if Gem.loaded_specs['lex-llm']
-  kit_path = File.join(Gem.loaded_specs['lex-llm'].full_gem_path, 'spec/legion/extensions/llm/conformance')
-  Dir[File.join(kit_path, '**', '*.rb')].each { |f| require f }
+  kit_file = File.join(Gem.loaded_specs['lex-llm'].full_gem_path,
+                       'spec/legion/extensions/llm/conformance/ssot_provider_examples.rb')
+  require kit_file if File.exist?(kit_file)
 end
 
-if defined?(Legion::Logging)
-  null_logger = Logger.new(File::NULL)
-  null_logger.level = Logger::DEBUG
-  Legion::Logging.instance_variable_set(:@log, null_logger)
-  Legion::Logging.instance_variable_set(
-    :@current_settings,
-    {
-      level: :debug,
-      format: :text,
-      async: false,
-      trace: false,
-      trace_size: 0,
-      extended: false,
-      log_file: nil,
-      log_stdout: false,
-      include_pid: false,
-      color: false
-    }.freeze
-  )
-  Legion::Logging.instance_variable_set(:@configuration_generation, Legion::Logging.configuration_generation + 1)
-end
+Legion::Logging.setup(
+  level: 'debug',
+  format: :text,
+  async: false,
+  trace: false,
+  trace_size: 0,
+  extended: false,
+  log_file: File::NULL,
+  log_stdout: false,
+  include_pid: false,
+  color: false
+)

@@ -1,7 +1,10 @@
 # frozen_string_literal: true
 
+require 'concurrent'
 require 'digest'
+require 'json'
 require 'uri'
+require 'faraday'
 
 begin
   require 'legion/extensions/actors/every'
@@ -9,7 +12,13 @@ rescue LoadError
   nil
 end
 
+unless defined?(Legion::Extensions::Actors::Every)
+  raise LoadError, 'LegionIO actor runtime is required for Gemini discovery'
+end
+
+require 'legion/extensions/llm/gemini/provider'
 require 'legion/extensions/llm/inventory/publisher'
+require 'legion/extensions/llm/inventory/scoped_refresher'
 require 'legion/extensions/llm/inventory/identity'
 require 'legion/extensions/llm/inventory/records'
 require 'legion/extensions/llm/inventory/evidence'
@@ -17,8 +26,6 @@ require 'legion/extensions/llm/inventory/probe_coordinator'
 require 'legion/extensions/llm/routing/provider_outcome'
 require 'legion/extensions/llm/taxonomies'
 require 'legion/extensions/llm/capabilities'
-
-return unless defined?(Legion::Extensions::Actors::Every)
 
 module Legion
   module Extensions
@@ -168,6 +175,11 @@ module Legion
           module ModelDiscovery
             private
 
+            # Only transport and body-parse failures yield "no offerings".
+            # Programming errors (NameError/NoMethodError/ArgumentError) must
+            # propagate to the caller's loud log path — rescuing them here
+            # would publish an activated instance with ZERO offerings
+            # (invisible to the router) while looking healthy.
             def discover_offerings_for_instance(instance_cfg:, instance_key:)
               models = fetch_models(instance_cfg: instance_cfg)
               models.filter_map do |model_data|
@@ -179,7 +191,7 @@ module Legion
                   instance_cfg: instance_cfg, instance_key: instance_key
                 )
               end
-            rescue StandardError => e
+            rescue Faraday::Error, Legion::JSON::ParseError => e
               handle_exception(e, level: :warn, operation: 'gemini.actor.discover_offerings')
               []
             end
@@ -236,7 +248,10 @@ module Legion
               cfg_instances = settings[:instances]
               if cfg_instances.is_a?(Hash)
                 cfg_instances.each do |name, config|
-                  instances[name.to_sym] = normalize_instance_config(config: config)
+                  normalized = normalize_instance_config(config: config)
+                  next unless resolvable_api_key?(normalized[:gemini_api_key])
+
+                  instances[name.to_sym] = normalized
                 end
               end
               if instances.empty?
@@ -247,15 +262,23 @@ module Legion
             end
 
             def build_auto_instance
-              api_key = settings[:credentials][:api_key]
-              api_key = resolve_env_credential(api_key) if api_key.is_a?(String) && api_key.start_with?('env://')
-              return nil unless api_key.is_a?(String) && !api_key.strip.empty?
+              api_key = settings.dig(:credentials, :api_key)
+              api_key = resolve_env_credential(api_key) if env_credential?(api_key)
+              return nil unless resolvable_api_key?(api_key)
 
               {
                 gemini_api_base: settings[:endpoint],
                 gemini_api_key: api_key,
                 tier: settings[:tier]
               }
+            end
+
+            def resolvable_api_key?(api_key)
+              api_key.is_a?(String) && !api_key.strip.empty?
+            end
+
+            def env_credential?(value)
+              value.is_a?(String) && value.start_with?('env://')
             end
 
             def resolve_env_credential(value)
@@ -277,13 +300,20 @@ module Legion
               normalized[:gemini_api_base] ||= 'https://generativelanguage.googleapis.com/v1beta'
             end
 
+            # Resolves env:// credential references in the instances.* path so an
+            # env-only deployment claims the real key instead of the literal
+            # 'env://GEMINI_API_KEY' placeholder (which would 4xx and pin the
+            # instance in :initializing with a placeholder-fingerprinted id).
             def resolve_instance_credentials(normalized:)
               normalized[:gemini_api_key] ||= normalized.delete(:api_key)
               creds = normalized.delete(:credentials)
-              return unless creds.is_a?(Hash)
+              if creds.is_a?(Hash)
+                creds = creds.transform_keys(&:to_sym)
+                normalized[:gemini_api_key] ||= creds[:api_key]
+              end
+              return unless env_credential?(normalized[:gemini_api_key])
 
-              creds = creds.transform_keys(&:to_sym)
-              normalized[:gemini_api_key] ||= creds[:api_key]
+              normalized[:gemini_api_key] = resolve_env_credential(normalized[:gemini_api_key])
             end
           end
 
@@ -297,7 +327,6 @@ module Legion
             end
 
             def build_api_connection(base_url:, instance_cfg:)
-              require 'faraday'
               Faraday.new(url: base_url) do |f|
                 f.options.timeout      = 15
                 f.options.open_timeout = 5
@@ -352,6 +381,7 @@ module Legion
               readiness = check_health(instance_cfg: state[:instance_cfg])
               coordinator.finish_probe
               report_probe_result(instance_id: instance_id, probe_token: probe_token, readiness: readiness)
+              sync_display_health(state: state)
             rescue StandardError => e
               begin
                 coordinator&.finish_probe
@@ -374,6 +404,7 @@ module Legion
               readiness = check_health(instance_cfg: state[:instance_cfg])
               coordinator.finish_probe(request: request)
               report_probe_result(instance_id: instance_id, probe_token: probe_token, readiness: readiness)
+              sync_display_health(state: state)
             rescue StandardError => e
               begin
                 coordinator&.finish_probe(request: request)
@@ -440,29 +471,141 @@ module Legion
           end
 
           # ── Instance lifecycle helpers ───────────────────────────────────────
-          module InstanceLifecycle
+          # ── Offering change comparison helpers ───────────────────────────────
+          module OfferingComparison
             private
 
-            def initial_discovery
-              @instance_states = {}
-              configured_instances.each do |name, instance_cfg|
-                claim_and_activate_instance(name: name, instance_cfg: instance_cfg)
-              rescue StandardError => e
-                handle_exception(e, level: :warn, operation: 'gemini.actor.claim_instance', instance_name: name.to_s)
-              end
+            # Compare on identity and evidence status, not Data#==: every draft
+            # embeds a fresh Time.now observed_at, so Data equality is false
+            # across ticks even when the model set and capabilities are
+            # unchanged (replace churn on every tick).
+            def offerings_changed?(previous:, current:)
+              current.map { |draft| offering_signature(draft) } !=
+                previous.map { |draft| offering_signature(draft) }
             end
 
-            def claim_and_activate_instance(name:, instance_cfg:)
-              instance_id  = derive_instance_id(instance_cfg: instance_cfg)
-              instance_key = build_instance_key(instance_id: instance_id)
-              components   = build_instance_components(instance_id: instance_id, instance_cfg: instance_cfg,
-                                                       instance_key: instance_key)
-              offerings    = discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
-              activate_with_initial_probe(instance_id: instance_id, instance_cfg: instance_cfg,
-                                          components: components, offerings: offerings)
-              store_instance_state(name: name, instance_id: instance_id, instance_key: instance_key,
-                                   instance_cfg: instance_cfg, components: components, offerings: offerings)
+            def offering_signature(draft)
+              [
+                draft.provider_native_key,
+                draft.model,
+                draft.tier,
+                operation_signature(draft),
+                capability_signature(draft),
+                value_signature(draft)
+              ]
             end
+
+            def operation_signature(draft)
+              draft.operation_evidence.values.map do |evidence|
+                [evidence.operation, evidence.status, evidence.source]
+              end.sort
+            end
+
+            def capability_signature(draft)
+              draft.capability_evidence.values.map do |evidence|
+                [evidence.capability, evidence.status, evidence.source]
+              end.sort
+            end
+
+            def value_signature(draft)
+              [
+                value_pair(draft.context_evidence),
+                value_pair(draft.max_output_evidence),
+                value_pair(draft.embedding_dimensions_evidence),
+                value_pair(draft.model_revision_evidence),
+                value_pair(draft.tokenizer_evidence)
+              ]
+            end
+
+            def value_pair(evidence)
+              [evidence.status, evidence.value]
+            end
+          end
+
+          # ── Settings display health helpers (D14) ────────────────────────────
+          module DisplayHealth
+            private
+
+            # Display-only health/capabilities for the status API, written after
+            # each registry commit. The key is the CONFIG name
+            # (settings[:instances] key), never the derived instance_id.
+            # Routing authority stays the in-memory AvailabilityFact; this hash
+            # is never read by the router.
+            def sync_display_health(state:)
+              entry = instance_settings_entry(name: state[:name])
+              return unless entry.is_a?(Hash)
+
+              entry.merge!(display_health_entry(state: state))
+            rescue StandardError => e
+              handle_exception(e, level: :warn, operation: 'gemini.actor.sync_display_health',
+                                  instance_id: state[:instance_id])
+            end
+
+            def display_health_entry(state:)
+              record = publisher.snapshot.instance(instance_key: state[:instance_key])
+              status = publisher.snapshot.publication_status(instance_key: state[:instance_key])
+              {
+                health: display_health(availability: record&.availability, status: status),
+                capabilities: instance_capabilities(state[:offerings])
+              }
+            end
+
+            def clear_display_health(name:)
+              entry = instance_settings_entry(name: name)
+              return unless entry.is_a?(Hash)
+
+              entry.delete(:health)
+              entry.delete(:capabilities)
+            rescue StandardError => e
+              handle_exception(e, level: :warn, operation: 'gemini.actor.clear_display_health',
+                                  instance_name: name.to_s)
+            end
+
+            def instance_settings_entry(name:)
+              instances = settings[:instances]
+              return nil unless instances.is_a?(Hash)
+
+              instances[name] || instances[name.to_s]
+            end
+
+            def display_health(availability:, status:)
+              available = availability&.state == :available
+              {
+                circuit_state: available ? :closed : :open,
+                denied: false,
+                available: available,
+                adjustment: available ? 0 : -50,
+                reason: health_reason(availability: availability, status: status),
+                observed_at: health_observed_at(availability: availability, status: status),
+                last_probe_outcome: status.last_probe_outcome,
+                source: health_source(availability: availability)
+              }
+            end
+
+            def health_reason(availability:, status:)
+              availability&.reason || status.last_error
+            end
+
+            def health_observed_at(availability:, status:)
+              availability&.observed_at || status.last_probe_completed_at
+            end
+
+            def health_source(availability:)
+              availability&.source || :initial_readiness
+            end
+
+            def instance_capabilities(offerings)
+              offerings.flat_map do |draft|
+                draft.capability_evidence.filter_map do |capability, evidence|
+                  evidence.supported? ? capability : nil
+                end
+              end.uniq.sort
+            end
+          end
+
+          # ── Instance component helpers ───────────────────────────────────────
+          module InstanceComponents
+            private
 
             def build_instance_key(instance_id:)
               Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
@@ -481,15 +624,105 @@ module Legion
               { callable: callable, probe_coordinator: probe_coordinator, publisher_token: publisher_token }
             end
 
-            def activate_with_initial_probe(instance_id:, instance_cfg:, components:, offerings:)
+            def claim_and_activate_instance(name:, instance_cfg:)
+              instance_id  = derive_instance_id(instance_cfg: instance_cfg)
+              instance_key = build_instance_key(instance_id: instance_id)
+              components   = build_instance_components(instance_id: instance_id, instance_cfg: instance_cfg,
+                                                       instance_key: instance_key)
+              offerings    = discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
+              state        = {
+                name: name,
+                instance_id: instance_id,
+                instance_key: instance_key,
+                instance_cfg: instance_cfg,
+                callable: components[:callable],
+                probe_coordinator: components[:probe_coordinator],
+                publisher_token: components[:publisher_token],
+                sequence: 0,
+                offerings: offerings
+              }
+              settle_initial_readiness(instance_id: instance_id, state: state)
+              @instance_states[instance_id] = state
+              sync_display_health(state: state)
+            end
+
+            def drop_instance(instance_id:, state:)
+              publisher.remove_instance(instance_id: instance_id, publisher_token: state[:publisher_token])
+              state[:callable]&.disconnect
+              clear_display_health(name: state[:name])
+              @instance_states.delete(instance_id)
+            rescue StandardError => e
+              handle_exception(e, level: :warn, operation: 'gemini.actor.remove_instance',
+                                  instance_id: instance_id)
+            end
+          end
+
+          # Per-instance SSOT lifecycle: reconcile configured instances each
+          # tick, run the readiness state machine (initial probe, recovery
+          # while :initializing, cadence probes, snapshot replacement), and
+          # retire instances on shutdown.
+          module InstanceLifecycle
+            private
+
+            def initial_discovery
+              @instance_states = Concurrent::Map.new
+              reconcile_and_refresh
+            end
+
+            def tick_refresh = reconcile_and_refresh
+
+            # Re-scans configured instances every tick so instances configured
+            # after boot appear without a restart and instances removed from
+            # settings are retired from the registry. Instances claimed THIS
+            # tick are not refreshed again in the same pass — their initial
+            # probe just ran; refresh and cadence probes start next tick.
+            def reconcile_and_refresh
+              configured = configured_instances
+              existing = @instance_states.keys
+              add_newly_configured_instances(configured: configured)
+              remove_unconfigured_instances(configured: configured)
+              @instance_states.each do |instance_id, state|
+                next unless existing.include?(instance_id)
+
+                refresh_instance(instance_id: instance_id, state: state)
+              rescue StandardError => e
+                handle_exception(e, level: :warn, operation: 'gemini.actor.refresh_instance',
+                                    instance_id: instance_id)
+              end
+            end
+
+            def add_newly_configured_instances(configured:)
+              configured.each do |name, instance_cfg|
+                instance_id = derive_instance_id(instance_cfg: instance_cfg)
+                next if @instance_states.key?(instance_id)
+
+                claim_and_activate_instance(name: name, instance_cfg: instance_cfg)
+              rescue StandardError => e
+                handle_exception(e, level: :warn, operation: 'gemini.actor.claim_instance', instance_name: name.to_s)
+              end
+            end
+
+            def remove_unconfigured_instances(configured:)
+              @instance_states.each_value do |state|
+                next if configured.key?(state[:name])
+
+                drop_instance(instance_id: state[:instance_id], state: state)
+              end
+            end
+
+            # Starts the readiness probe and settles it: on success activates
+            # the current offerings (sequence 0 — valid only while the scope
+            # is still :initializing), on failure records it and the instance
+            # stays :initializing for the next tick's retry.
+            def settle_initial_readiness(instance_id:, state:)
               probe_token = publisher.readiness_probe_started(
-                instance_id: instance_id, publisher_token: components[:publisher_token]
+                instance_id: instance_id, publisher_token: state[:publisher_token]
               )
-              readiness = check_health(instance_cfg: instance_cfg)
+              readiness = check_health(instance_cfg: state[:instance_cfg])
               if readiness.ready?
                 publisher.activate_instance_snapshot(
-                  instance_id: instance_id, publisher_token: components[:publisher_token],
-                  offerings: offerings, sequence: 0, probe_token: probe_token
+                  instance_id: instance_id, publisher_token: state[:publisher_token],
+                  offerings: state[:offerings], sequence: 0, probe_token: probe_token
                 )
               else
                 publisher.readiness_failed(
@@ -498,63 +731,64 @@ module Legion
               end
             end
 
-            def store_instance_state(name:, instance_id:, instance_key:, instance_cfg:, **opts)
-              @instance_states[instance_id] = {
-                name: name,
-                instance_key: instance_key,
-                instance_cfg: instance_cfg,
-                callable: opts[:components][:callable],
-                probe_coordinator: opts[:components][:probe_coordinator],
-                publisher_token: opts[:components][:publisher_token],
-                sequence: 0,
-                offerings: opts[:offerings]
-              }
-            end
-
-            def tick_refresh
-              @instance_states.each do |instance_id, state|
-                refresh_instance(instance_id: instance_id, state: state)
-              rescue StandardError => e
-                handle_exception(e, level: :warn, operation: 'gemini.actor.refresh_instance',
-                                    instance_id: instance_id)
+            def refresh_instance(instance_id:, state:)
+              if publication_state(instance_key: state[:instance_key]) == :initializing
+                retry_initial_activation(instance_id: instance_id, state: state)
+              else
+                replace_offerings_if_changed(instance_id: instance_id, state: state)
+                run_cadence_probe(instance_id: instance_id, state: state)
               end
             end
 
-            def refresh_instance(instance_id:, state:)
+            def publication_state(instance_key:)
+              publisher.snapshot.publication_status(instance_key: instance_key).state
+            end
+
+            # An instance that failed initial readiness stays :initializing —
+            # readiness_succeeded and replace_instance_snapshot both refuse to
+            # operate on an :initializing scope, so without this re-activation
+            # path a transient outage at boot pins the instance for the process
+            # lifetime. Re-probe each tick and activate once readiness passes.
+            def retry_initial_activation(instance_id:, state:)
+              state[:offerings] = discover_offerings_for_instance(
+                instance_cfg: state[:instance_cfg], instance_key: state[:instance_key]
+              )
+              settle_initial_readiness(instance_id: instance_id, state: state)
+              sync_display_health(state: state)
+            end
+
+            def replace_offerings_if_changed(instance_id:, state:)
               new_offerings = discover_offerings_for_instance(
                 instance_cfg: state[:instance_cfg], instance_key: state[:instance_key]
               )
-              if new_offerings != state[:offerings]
-                state[:sequence] += 1
-                publisher.replace_instance_snapshot(
-                  instance_id: instance_id, publisher_token: state[:publisher_token],
-                  offerings: new_offerings, sequence: state[:sequence]
-                )
-                state[:offerings] = new_offerings
-              end
-              run_cadence_probe(instance_id: instance_id, state: state)
+              return unless offerings_changed?(previous: state[:offerings], current: new_offerings)
+
+              state[:sequence] += 1
+              publisher.replace_instance_snapshot(
+                instance_id: instance_id, publisher_token: state[:publisher_token],
+                offerings: new_offerings, sequence: state[:sequence]
+              )
+              state[:offerings] = new_offerings
+              sync_display_health(state: state)
             end
 
             def remove_all_instances
               return unless @instance_states
 
-              @instance_states.each do |instance_id, state|
-                publisher.remove_instance(
-                  instance_id: instance_id, publisher_token: state[:publisher_token]
-                )
-              rescue StandardError => e
-                handle_exception(e, level: :warn, operation: 'gemini.actor.remove_instance',
-                                    instance_id: instance_id)
+              @instance_states.each_value do |state|
+                drop_instance(instance_id: state[:instance_id], state: state)
               end
               @instance_states.clear
             end
           end
 
           # SSOT v3 periodic discovery actor for Gemini provider instances.
-          # Claims instances, discovers models via the Gemini models API,
-          # probes health via model listing, and publishes complete OfferingDraft
-          # snapshots through the Inventory::Publisher. Supports coalesced reactive
-          # probes after dispatch-triggered instance_unavailable transitions.
+          # Claims configured instances, discovers models via the Gemini models
+          # API, probes health via model listing, and publishes complete
+          # OfferingDraft snapshots through the Inventory::Publisher. Recovers
+          # instances that fail initial readiness and supports coalesced
+          # reactive probes after dispatch-triggered instance_unavailable
+          # transitions.
           class DiscoveryRefresh < Legion::Extensions::Actors::Every
             include Legion::Extensions::Helpers::Lex
             include Legion::Logging::Helper
@@ -565,9 +799,10 @@ module Legion
             include HttpClient
             include ProbeRunner
             include HealthChecker
+            include OfferingComparison
+            include DisplayHealth
+            include InstanceComponents
             include InstanceLifecycle
-
-            def self.every_seconds = 3600
 
             def runner_class    = self.class
             def runner_function = 'manual'
@@ -576,8 +811,15 @@ module Legion
             def check_subtask?  = false
             def generate_task?  = false
 
+            # The registered discovery interval lives under instances.default
+            # (provider_settings nests it there). Never return nil — a nil
+            # execution_interval makes the TimerTask fire exactly once and then
+            # stop, killing all refresh, probes, and recovery.
             def time
-              settings[:discovery_interval]
+              interval = settings.dig(:instances, :default, :discovery_interval)
+              return interval if interval.is_a?(::Integer) && interval.positive?
+
+              Legion::Extensions::Llm::Gemini.default_settings.dig(:instances, :default, :discovery_interval)
             end
 
             def manual
@@ -600,87 +842,161 @@ module Legion
             private
 
             def publisher
-              @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :gemini)
+              @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(
+                provider_family: :gemini,
+                compatibility_adapter: Legion::Extensions::Llm::Inventory::ScopedRefresher::LegacyCoordinatorAdapter.new(
+                  provider_family: :gemini
+                )
+              )
             end
           end
 
           # Callable wrapper for a Gemini provider instance. Implements the
+          # fleet dispatch ops (chat/stream_chat/embed/count_tokens) by
+          # delegating to a per-instance Gemini::Provider, plus the
           # disconnect and normalize_dispatch_error contracts required by
-          # Inventory::CallableHandle and Routing::ProviderOutcome.
+          # Inventory::CallableHandle and Routing::ProviderOutcome. Dispatch
+          # errors propagate untouched so normalize_dispatch_error can
+          # classify them.
           class GeminiCallable
-            def initialize(instance_cfg:, logger:)
+            def initialize(instance_cfg:, logger:, provider: nil)
               @instance_cfg  = instance_cfg
               @logger        = logger
+              @provider      = provider
               @disconnected  = false
             end
 
-            def disconnected?
-              @disconnected
-            end
+            def disconnected? = @disconnected
 
             def disconnect
               @disconnected = true
+              @provider&.disconnect
               @logger.debug { '[gemini][callable] disconnected' }
+            end
+
+            # Fleet and SelectionDispatch pass model as a RAW STRING (the
+            # offering's model id). Gemini's render path calls model.id
+            # (MessageFormatter#render_payload), so a raw string must be
+            # wrapped before delegation; Model::Info instances pass through.
+            def chat(messages:, model:, **rest)
+              provider.chat(messages: messages, model: llm_model(model), **rest)
+            end
+
+            def stream_chat(messages:, model:, **rest, &)
+              provider.stream_chat(messages: messages, model: llm_model(model), **rest, &)
+            end
+
+            def embed(text:, model:, **rest)
+              provider.embed(text: text, model: llm_model(model), **rest)
+            end
+
+            def count_tokens(messages:, model:, **rest)
+              provider.count_tokens(messages: messages, model: llm_model(model), **rest)
             end
 
             def normalize_dispatch_error(error:)
               reason = error.message.to_s[0, 512]
-
-              kind = case error
-                     when Faraday::ConnectionFailed then :connection_failure
-                     when Faraday::TimeoutError     then :timeout
-                     when Faraday::ClientError      then classify_client_error(error: error)
-                     when Faraday::ServerError      then classify_server_error(error: error)
-                     when Legion::Extensions::Llm::OverloadedError then :overloaded
-                     else :provider_error
-                     end
-
               Legion::Extensions::Llm::Routing::ProviderOutcome.new(
-                kind: kind,
-                reason: reason.empty? ? 'unknown dispatch error' : reason
+                kind: classify_dispatch_error(error: error), reason: reason.empty? ? 'unknown dispatch error' : reason
               )
             end
 
             private
 
-            def classify_client_error(error:)
-              status = error.respond_to?(:response_status) ? error.response_status : nil
+            def llm_model(model)
+              return model if model.respond_to?(:id)
+
+              Legion::Extensions::Llm::Model::Info.new(id: model.to_s, provider: :gemini)
+            end
+
+            def provider = @provider ||= build_provider
+
+            def build_provider
+              Legion::Extensions::Llm::Gemini::Provider.new(
+                {
+                  gemini_api_key: @instance_cfg[:gemini_api_key] || @instance_cfg[:api_key] ||
+                                  @instance_cfg.dig(:credentials, :api_key),
+                  gemini_api_base: @instance_cfg[:gemini_api_base] || @instance_cfg[:endpoint]
+                }.compact
+              )
+            end
+
+            def classify_dispatch_error(error:)
+              return :connection_failure if error.is_a?(Faraday::ConnectionFailed)
+              return :timeout if error.is_a?(Faraday::TimeoutError)
+              return :overloaded if error.is_a?(Legion::Extensions::Llm::OverloadedError)
+              return classify_by_status(error: error) if http_status_error?(error)
+
+              :provider_error
+            end
+
+            def http_status_error?(error)
+              error.is_a?(Faraday::ClientError) || error.is_a?(Faraday::ServerError) ||
+                error.is_a?(Legion::Extensions::Llm::Error)
+            end
+
+            # §8 health firewall: only the explicit Gemini UNAVAILABLE body
+            # signal maps to :instance_unavailable. Status code alone (503/529)
+            # never does — those are request-local overload conditions.
+            def classify_by_status(error:)
+              return :instance_unavailable if explicit_service_unavailable?(error: error)
+
+              status = dispatch_status(error)
+              return :model_not_ready if status.is_a?(::Integer) && status >= 500 &&
+                                         model_not_ready_signal?(error: error)
+
+              status_kind(status)
+            end
+
+            def status_kind(status)
               case status
               when 401 then :authentication
               when 403 then :authorization
               when 404 then :model_missing
               when 429 then :rate_limited
-              else :invalid_request
-              end
-            end
-
-            def classify_server_error(error:)
-              # An explicit Gemini UNAVAILABLE status in the response body is the
-              # only flat service/instance-unavailable condition (§8). Status code
-              # alone never maps to instance_unavailable.
-              return :instance_unavailable if explicit_service_unavailable?(error: error)
-
-              status = error.respond_to?(:response_status) ? error.response_status : nil
-              case status
               when 503, 529 then :overloaded
+              when 400...500 then :invalid_request
               else :provider_error
               end
             end
 
-            # Returns true only when the Gemini API response body explicitly carries
-            # "status":"UNAVAILABLE" — the flat service-level unavailability signal
-            # distinct from throttling (RESOURCE_EXHAUSTED) or model loading.
+            # Returns true only when the Gemini API response body explicitly
+            # carries "status":"UNAVAILABLE" — the flat service-level
+            # unavailability signal distinct from throttling
+            # (RESOURCE_EXHAUSTED) or model loading.
             def explicit_service_unavailable?(error:)
-              return false unless error.respond_to?(:response)
-
-              response = error.response
-              return false unless response.is_a?(Hash)
-
-              body = response[:body]
-              return false unless body.is_a?(String)
+              body = response_body_string(error)
+              return false if body.nil?
 
               (body.include?('"status":"UNAVAILABLE"') || body.include?('"status": "UNAVAILABLE"')) &&
                 !body.include?('RESOURCE_EXHAUSTED')
+            end
+
+            def model_not_ready_signal?(error:)
+              body = response_body_string(error)&.downcase
+              body.to_s.include?('model not ready') || body.to_s.include?('model is still loading')
+            end
+
+            # Reads the body from every real Faraday error shape: Faraday::Env
+            # (Faraday 2.x — a Struct, NOT a Hash, which is why an
+            # is_a?(Hash) gate here is dead in production), Faraday::Response
+            # (lex-llm ErrorMiddleware), or the plain response Hash (Faraday
+            # RaiseError middleware / Faraday 1.x).
+            def response_body_string(error)
+              response = error.respond_to?(:response) ? error.response : nil
+              return nil unless response
+
+              body = response.respond_to?(:body) ? response.body : (response[:body] if response.respond_to?(:[]))
+              return body if body.is_a?(String)
+
+              body && ::JSON.generate(body)
+            end
+
+            def dispatch_status(error)
+              return error.response_status if error.respond_to?(:response_status) && error.response_status
+
+              response = error.respond_to?(:response) ? error.response : nil
+              response.respond_to?(:status) ? response.status : nil
             end
           end
         end

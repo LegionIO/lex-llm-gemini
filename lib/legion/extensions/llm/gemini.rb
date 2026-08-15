@@ -3,7 +3,7 @@
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/gemini/provider'
 require 'legion/extensions/llm/gemini/version'
-require_relative 'gemini/actors/discovery_refresh'
+require 'legion/extensions/llm/gemini/actors/discovery_refresh'
 
 module Legion
   module Extensions
@@ -11,7 +11,7 @@ module Legion
     module Llm
       # Gemini provider extension namespace.
       module Gemini
-        extend ::Legion::Extensions::Core if ::Legion::Extensions.const_defined?(:Core, false)
+        extend ::Legion::Extensions::Core
         extend Legion::Logging::Helper
         extend Legion::Extensions::Llm::AutoRegistration
 
