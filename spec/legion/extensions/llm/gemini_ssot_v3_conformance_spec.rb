@@ -76,13 +76,18 @@ end
 # identity/draft building delegate to the actor's PRODUCTION methods — the
 # harness duplicates no builder logic (drift would mask production bugs).
 class GeminiSsotHarness
+  # Each config carries its operator CONFIG NAME (the key it would hold under
+  # settings[:instances]) — the name is the instance identity; the derived
+  # host:port/ak id is the secondary physical id only.
   INSTANCE_CONFIGS = [
     {
+      name: 'gemini-alpha',
       gemini_api_base: 'https://generativelanguage.googleapis.com/v1beta',
       tier: :frontier, gemini_api_key: 'AIzaSyTestKey1-AAAA',
       usage: { inference: true, embedding: true }
     }.freeze,
     {
+      name: 'gemini-beta',
       gemini_api_base: 'https://generativelanguage.googleapis.com/v1beta',
       tier: :frontier, gemini_api_key: 'AIzaSyTestKey2-BBBB',
       usage: { inference: true, embedding: true }
@@ -97,10 +102,17 @@ class GeminiSsotHarness
   def provider_family = :gemini
   def instance_configs = INSTANCE_CONFIGS
 
-  # Delegates to the actor's PRODUCTION identity derivation.
+  # The operator's CONFIG NAME is the identity (InstanceKey.instance_id) —
+  # the key the router looks up in instances.<name>.
   def instance_id(instance_config:)
+    instance_config[:name].to_s
+  end
+
+  # Delegates to the actor's PRODUCTION physical-id derivation (secondary
+  # field: dedup/diagnostics only, never the identity).
+  def physical_id(instance_config:)
     Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh
-      .allocate.send(:derive_instance_id, instance_cfg: instance_config)
+      .allocate.send(:derive_physical_id, instance_cfg: instance_config)
   end
 
   def build_callable(instance_config:)
@@ -117,8 +129,11 @@ class GeminiSsotHarness
   def build_offering_drafts(instance_config:, tier: :frontier, **)
     actor = Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh.allocate
     cfg = instance_config.merge(tier: tier)
-    instance_id = actor.send(:derive_instance_id, instance_cfg: cfg)
-    instance_key = actor.send(:build_instance_key, instance_id: instance_id)
+    instance_key = actor.send(
+      :build_instance_key,
+      instance_id: instance_id(instance_config: instance_config),
+      physical_id: physical_id(instance_config: cfg)
+    )
     [
       actor.send(
         :build_offering_draft,
@@ -200,51 +215,71 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   # ─── Gemini-specific identity derivation ────────────────────────────────────
 
   describe 'instance identity derivation' do
-    it 'derives instance_id as host:port/ak:fingerprint with API key' do
-      config = { gemini_api_base: 'https://generativelanguage.googleapis.com/v1beta',
+    it 'uses the operator config name as the instance identity' do
+      config = ssot_harness.instance_configs[0]
+      expect(ssot_harness.instance_id(instance_config: config)).to eq('gemini-alpha')
+    end
+
+    it 'derives the SECONDARY physical id as host:port/ak:fingerprint with API key' do
+      config = { name: 'unused', gemini_api_base: 'https://generativelanguage.googleapis.com/v1beta',
                  gemini_api_key: 'AIzaSyTestKey1-AAAA' }
       fingerprint = Digest::SHA256.hexdigest('AIzaSyTestKey1-AAAA')[0, 8]
-      expect(ssot_harness.instance_id(instance_config: config))
+      expect(ssot_harness.physical_id(instance_config: config))
         .to eq("generativelanguage.googleapis.com:443/ak:#{fingerprint}")
     end
 
-    it 'produces distinct instance IDs for two different API keys' do
-      ids = ssot_harness.instance_configs.map { |cfg| ssot_harness.instance_id(instance_config: cfg) }
-      expect(ids.uniq.size).to eq(2)
+    it 'produces distinct physical ids for two different API keys (identity stays the name)' do
+      physical_ids = ssot_harness.instance_configs.map { |cfg| ssot_harness.physical_id(instance_config: cfg) }
+      names        = ssot_harness.instance_configs.map { |cfg| ssot_harness.instance_id(instance_config: cfg) }
+      expect(physical_ids.uniq.size).to eq(2)
+      expect(names.uniq.size).to eq(2)
     end
 
-    it 'reproduces the same instance_id across multiple calls (stable identity)' do
+    it 'reproduces the identity and physical id across multiple calls (stable)' do
       config = ssot_harness.instance_configs.first
       id_first  = ssot_harness.instance_id(instance_config: config)
       id_second = ssot_harness.instance_id(instance_config: config)
       expect(id_first).to eq(id_second)
+
+      physical_first  = ssot_harness.physical_id(instance_config: config)
+      physical_second = ssot_harness.physical_id(instance_config: config)
+      expect(physical_first).to eq(physical_second)
     end
   end
 
-  # ─── Two API keys with same model = separate lanes ─────────────────────────
+  # ─── Two config names with same endpoint/model = separate lanes ───────────
 
-  describe 'two Gemini API keys serving the same model' do
+  describe 'two config names serving the same model' do
+    def build_instance_key_for(config)
+      Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :gemini,
+        instance_id: ssot_harness.instance_id(instance_config: config),
+        physical_id: ssot_harness.physical_id(instance_config: config)
+      )
+    end
+
     def bring_up_instance(config, tier: :frontier)
       publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :gemini)
-      instance_id = ssot_harness.instance_id(instance_config: config)
-      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :gemini, instance_id: instance_id
-      )
+      key         = build_instance_key_for(config)
+      instance_id = key.instance_id
+      physical_id = key.physical_id
       callable = ssot_harness.build_callable(instance_config: config)
       coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
         instance_key: key, enqueue: ->(**) { true }
       )
       token = publisher.claim_instance(instance_id: instance_id, callable: callable,
-                                       probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token)
+                                       probe_request_handle: coordinator, physical_id: physical_id)
+      probe = publisher.readiness_probe_started(instance_id: instance_id, publisher_token: token,
+                                                physical_id: physical_id)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: tier)
       publisher.activate_instance_snapshot(
-        instance_id: instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
+        instance_id: instance_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe,
+        physical_id: physical_id
       )
       { publisher: publisher, key: key, callable: callable, token: token, drafts: drafts, coordinator: coordinator }
     end
 
-    it 'creates separate lanes for the same model on different API keys' do
+    it 'creates separate lanes for the same model under distinct config names' do
       a = bring_up_instance(ssot_harness.instance_configs[0])
       b = bring_up_instance(ssot_harness.instance_configs[1])
 
@@ -255,6 +290,11 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       expect(lanes_a).not_to be_empty
       expect(lanes_b).not_to be_empty
       expect(lanes_a.map(&:lane_id) & lanes_b.map(&:lane_id)).to be_empty
+      # Same endpoint, same model — the physical ids differ by API key while
+      # the identities are the config names.
+      expect(a[:key].instance_id).to eq('gemini-alpha')
+      expect(b[:key].instance_id).to eq('gemini-beta')
+      expect(a[:key].physical_id).not_to eq(b[:key].physical_id)
     end
 
     it 'reproduces IDs after restart (identity is deterministic from inputs)' do

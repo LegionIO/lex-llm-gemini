@@ -248,10 +248,8 @@ module Legion
               cfg_instances = settings[:instances]
               if cfg_instances.is_a?(Hash)
                 cfg_instances.each do |name, config|
-                  normalized = normalize_instance_config(config: config)
-                  next unless resolvable_api_key?(normalized[:gemini_api_key])
-
-                  instances[name.to_sym] = normalized
+                  normalized = claimable_instance_config(name: name, config: config)
+                  instances[name.to_sym] = normalized if normalized
                 end
               end
               if instances.empty?
@@ -259,6 +257,44 @@ module Legion
                 instances[:default_instance] = auto_instance if auto_instance
               end
               instances
+            end
+
+            # Returns the normalized config when the entry is claimable, else
+            # nil: it needs a resolvable API key, and its name must not be the
+            # reserved "default" identity (loudly skipped when it is).
+            def claimable_instance_config(name:, config:)
+              normalized = normalize_instance_config(config: config)
+
+              return unless resolvable_api_key?(normalized[:gemini_api_key])
+
+              if reserved_instance_name?(name)
+                warn_reserved_instance_name
+                return
+              end
+
+              normalized
+            end
+
+            # "default" is the reserved SSOT v3 instance identity: Identity::
+            # InstanceKey rejects it, so an entry literally named `default`
+            # (including the always-present synthetic provider_settings
+            # template) can never be published under name-based identity.
+            # The skip is unconditional, every tick.
+            def reserved_instance_name?(name)
+              name.to_s == 'default'
+            end
+
+            # Warns once per actor lifetime so the skip is loud without
+            # spamming every tick.
+            def warn_reserved_instance_name
+              return if @reserved_name_warned
+
+              @reserved_name_warned = true
+              log.warn(
+                'gemini: instances.default is not claimable — "default" is a reserved ' \
+                'SSOT v3 instance identity (InstanceKey rejects it); rename the config ' \
+                'entry to publish it'
+              )
             end
 
             def build_auto_instance
@@ -344,7 +380,11 @@ module Legion
               faraday.headers['x-goog-api-key'] = api_key
             end
 
-            def derive_instance_id(instance_cfg:)
+            # SECONDARY physical id (InstanceKey.physical_id): the derived
+            # host:port/ak fingerprint, kept for dedup and diagnostics only.
+            # Instance IDENTIFICATION is the operator's config name — see
+            # claim_and_activate_instance. Never the identity itself.
+            def derive_physical_id(instance_cfg:)
               base_url   = instance_cfg[:gemini_api_base] || instance_cfg[:endpoint] ||
                            'https://generativelanguage.googleapis.com/v1beta'
               host_port  = extract_host_port(url: base_url)
@@ -375,19 +415,10 @@ module Legion
               coordinator = state[:probe_coordinator]
               return unless coordinator.begin_probe
 
-              probe_token = publisher.readiness_probe_started(
-                instance_id: instance_id, publisher_token: state[:publisher_token]
-              )
-              readiness = check_health(instance_cfg: state[:instance_cfg])
-              coordinator.finish_probe
-              report_probe_result(instance_id: instance_id, probe_token: probe_token, readiness: readiness)
+              run_instance_probe(instance_id: instance_id, state: state, coordinator: coordinator)
               sync_display_health(state: state)
             rescue StandardError => e
-              begin
-                coordinator&.finish_probe
-              rescue StandardError => finish_err
-                handle_exception(finish_err, level: :warn, operation: 'gemini.actor.cadence_probe.finish_probe')
-              end
+              finish_probe_on_error(coordinator: coordinator)
               handle_exception(e, level: :warn, operation: 'gemini.actor.cadence_probe', instance_id: instance_id)
             end
 
@@ -398,28 +429,52 @@ module Legion
               coordinator = state[:probe_coordinator]
               return unless coordinator.begin_probe(request: request)
 
-              probe_token = publisher.readiness_probe_started(
-                instance_id: instance_id, publisher_token: state[:publisher_token]
-              )
-              readiness = check_health(instance_cfg: state[:instance_cfg])
-              coordinator.finish_probe(request: request)
-              report_probe_result(instance_id: instance_id, probe_token: probe_token, readiness: readiness)
+              run_instance_probe(instance_id: instance_id, state: state, coordinator: coordinator, request: request)
               sync_display_health(state: state)
             rescue StandardError => e
-              begin
-                coordinator&.finish_probe(request: request)
-              rescue StandardError => finish_err
-                handle_exception(finish_err, level: :warn, operation: 'gemini.actor.reactive_probe.finish_probe')
-              end
+              finish_probe_on_error(coordinator: coordinator, request: request)
               handle_exception(e, level: :warn, operation: 'gemini.actor.reactive_probe', instance_id: instance_id)
             end
 
-            def report_probe_result(instance_id:, probe_token:, readiness:)
+            # Shared probe body: starts the publisher probe, checks health,
+            # finishes the coordinator probe (coalesced probes pass their
+            # request token), and reports the outcome.
+            def run_instance_probe(instance_id:, state:, coordinator:, request: nil)
+              probe_token = publisher.readiness_probe_started(
+                instance_id: instance_id, publisher_token: state[:publisher_token],
+                physical_id: state[:instance_key].physical_id
+              )
+              readiness = check_health(instance_cfg: state[:instance_cfg])
+              if request
+                coordinator.finish_probe(request: request)
+              else
+                coordinator.finish_probe
+              end
+              report_probe_result(instance_id: instance_id, state: state,
+                                  probe_token: probe_token, readiness: readiness)
+            end
+
+            # Best-effort probe release on the error path — a failure to
+            # release is logged, never raised over the original error.
+            def finish_probe_on_error(coordinator:, request: nil)
+              if request
+                coordinator&.finish_probe(request: request)
+              else
+                coordinator&.finish_probe
+              end
+            rescue StandardError => e
+              handle_exception(e, level: :warn, operation: 'gemini.actor.probe.finish_probe')
+            end
+
+            def report_probe_result(instance_id:, state:, probe_token:, readiness:)
               if readiness.ready?
-                publisher.readiness_succeeded(instance_id: instance_id, probe_token: probe_token)
+                publisher.readiness_succeeded(
+                  instance_id: instance_id, physical_id: state[:instance_key].physical_id, probe_token: probe_token
+                )
               else
                 publisher.readiness_failed(
-                  instance_id: instance_id, probe_token: probe_token, reason: readiness.reason
+                  instance_id: instance_id, physical_id: state[:instance_key].physical_id,
+                  probe_token: probe_token, reason: readiness.reason
                 )
               end
             end
@@ -607,9 +662,9 @@ module Legion
           module InstanceComponents
             private
 
-            def build_instance_key(instance_id:)
+            def build_instance_key(instance_id:, physical_id: nil)
               Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-                provider_family: :gemini, instance_id: instance_id
+                provider_family: :gemini, instance_id: instance_id, physical_id: physical_id
               )
             end
 
@@ -619,14 +674,19 @@ module Legion
                 instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: instance_id)
               )
               publisher_token = publisher.claim_instance(
-                instance_id: instance_id, callable: callable, probe_request_handle: probe_coordinator
+                instance_id: instance_id, callable: callable, probe_request_handle: probe_coordinator,
+                physical_id: instance_key.physical_id
               )
               { callable: callable, probe_coordinator: probe_coordinator, publisher_token: publisher_token }
             end
 
             def claim_and_activate_instance(name:, instance_cfg:)
-              instance_id  = derive_instance_id(instance_cfg: instance_cfg)
-              instance_key = build_instance_key(instance_id: instance_id)
+              # Identity is the operator's CONFIG NAME (the key the router
+              # looks up in instances.<name>); the derived host:port/ak id is
+              # the secondary physical id (dedup/diagnostics only).
+              instance_id  = name.to_s
+              physical_id  = derive_physical_id(instance_cfg: instance_cfg)
+              instance_key = build_instance_key(instance_id: instance_id, physical_id: physical_id)
               components   = build_instance_components(instance_id: instance_id, instance_cfg: instance_cfg,
                                                        instance_key: instance_key)
               offerings    = discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
@@ -647,7 +707,10 @@ module Legion
             end
 
             def drop_instance(instance_id:, state:)
-              publisher.remove_instance(instance_id: instance_id, publisher_token: state[:publisher_token])
+              publisher.remove_instance(
+                instance_id: instance_id, publisher_token: state[:publisher_token],
+                physical_id: state[:instance_key].physical_id
+              )
               state[:callable]&.disconnect
               clear_display_health(name: state[:name])
               @instance_states.delete(instance_id)
@@ -693,8 +756,11 @@ module Legion
 
             def add_newly_configured_instances(configured:)
               configured.each do |name, instance_cfg|
-                instance_id = derive_instance_id(instance_cfg: instance_cfg)
-                next if @instance_states.key?(instance_id)
+                # Dedup on the CONFIG NAME (the identity), not the physical
+                # id: two config names pointing at the same endpoint are
+                # distinct instances (the physical id never participates in
+                # identity).
+                next if @instance_states.key?(name.to_s)
 
                 claim_and_activate_instance(name: name, instance_cfg: instance_cfg)
               rescue StandardError => e
@@ -715,18 +781,20 @@ module Legion
             # is still :initializing), on failure records it and the instance
             # stays :initializing for the next tick's retry.
             def settle_initial_readiness(instance_id:, state:)
+              physical_id = state[:instance_key].physical_id
               probe_token = publisher.readiness_probe_started(
-                instance_id: instance_id, publisher_token: state[:publisher_token]
+                instance_id: instance_id, publisher_token: state[:publisher_token], physical_id: physical_id
               )
               readiness = check_health(instance_cfg: state[:instance_cfg])
               if readiness.ready?
                 publisher.activate_instance_snapshot(
                   instance_id: instance_id, publisher_token: state[:publisher_token],
-                  offerings: state[:offerings], sequence: 0, probe_token: probe_token
+                  offerings: state[:offerings], sequence: 0, probe_token: probe_token, physical_id: physical_id
                 )
               else
                 publisher.readiness_failed(
-                  instance_id: instance_id, probe_token: probe_token, reason: readiness.reason
+                  instance_id: instance_id, probe_token: probe_token, reason: readiness.reason,
+                  physical_id: physical_id
                 )
               end
             end
@@ -766,7 +834,8 @@ module Legion
               state[:sequence] += 1
               publisher.replace_instance_snapshot(
                 instance_id: instance_id, publisher_token: state[:publisher_token],
-                offerings: new_offerings, sequence: state[:sequence]
+                offerings: new_offerings, sequence: state[:sequence],
+                physical_id: state[:instance_key].physical_id
               )
               state[:offerings] = new_offerings
               sync_display_health(state: state)

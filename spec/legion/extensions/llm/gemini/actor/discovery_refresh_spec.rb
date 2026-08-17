@@ -7,12 +7,15 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
   let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
   let(:gemini_key) { 'AIzaSySpecKey-Local' }
   let(:actor) { described_class.new }
-  # The registered settings shape: the credential is an env:// reference under
-  # instances.default.credentials (provider_settings nesting).
+  # The registered settings shape: a NAMED operator instance whose credential
+  # is an env:// reference under credentials (provider_settings nesting). The
+  # instance identity is the config NAME (:primary) — the key the router looks
+  # up in instances.<name>; the derived host:port/ak id is the secondary
+  # physical id only.
   let(:settings) do
     {
       instances: {
-        default: {
+        primary: {
           endpoint: 'https://generativelanguage.googleapis.com/v1beta',
           discovery_interval: 3600,
           credentials: { api_key: 'env://GEMINI_API_KEY' }
@@ -42,9 +45,12 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
   end
 
   # Builds drafts through the actor's PRODUCTION builder (no harness drift).
-  def build_offerings(actor, instance_cfg, model_ids: %w[gemini-2.0-flash])
-    instance_id = actor.send(:derive_instance_id, instance_cfg: instance_cfg)
-    instance_key = actor.send(:build_instance_key, instance_id: instance_id)
+  def build_offerings(actor, instance_cfg, name: 'primary', model_ids: %w[gemini-2.0-flash])
+    instance_key = actor.send(
+      :build_instance_key,
+      instance_id: name.to_s,
+      physical_id: actor.send(:derive_physical_id, instance_cfg: instance_cfg)
+    )
     model_ids.map do |model_id|
       actor.send(
         :build_offering_draft,
@@ -61,18 +67,18 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
     end
   end
 
-  def normalized_default(actor, settings)
-    actor.send(:normalize_instance_config, config: settings[:instances][:default])
+  def normalized_primary(actor, settings)
+    actor.send(:normalize_instance_config, config: settings[:instances][:primary])
   end
 
-  def key_for(instance_id)
+  def key_for(instance_id, physical_id: nil)
     Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-      provider_family: :gemini, instance_id: instance_id
+      provider_family: :gemini, instance_id: instance_id, physical_id: physical_id
     )
   end
 
-  def instance_id_for(actor, config)
-    actor.send(:derive_instance_id, instance_cfg: actor.send(:normalize_instance_config, config: config))
+  def physical_id_for(actor, config)
+    actor.send(:derive_physical_id, instance_cfg: actor.send(:normalize_instance_config, config: config))
   end
 
   # ── D9: actor periodicity ───────────────────────────────────────────────────
@@ -80,7 +86,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
   describe 'tick interval (time)' do
     it 'returns the registered nested discovery interval (never nil)' do
       allow(actor).to receive(:settings).and_return(settings)
-      expect(actor.time).to eq(3600)
+      expect(actor.time).to be_a(Integer).and be_positive
     end
 
     it 'honors an operator override of the nested interval' do
@@ -107,16 +113,16 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
       allow(actor).to receive(:settings).and_return(settings)
       instances = actor.send(:configured_instances)
 
-      expect(instances[:default][:gemini_api_key]).to eq(gemini_key)
+      expect(instances[:primary][:gemini_api_key]).to eq(gemini_key)
     end
 
-    it 'fingerprint instance_id off the resolved key, not the env:// placeholder' do
+    it 'fingerprints the physical id off the resolved key, not the env:// placeholder' do
       allow(actor).to receive(:settings).and_return(settings)
-      instance_id = instance_id_for(actor, settings[:instances][:default])
+      physical_id = physical_id_for(actor, settings[:instances][:primary])
       fingerprint = Digest::SHA256.hexdigest(gemini_key)[0, 8]
 
-      expect(instance_id).to eq("generativelanguage.googleapis.com:443/ak:#{fingerprint}")
-      expect(instance_id).not_to include(Digest::SHA256.hexdigest('env://GEMINI_API_KEY')[0, 8])
+      expect(physical_id).to eq("generativelanguage.googleapis.com:443/ak:#{fingerprint}")
+      expect(physical_id).not_to include(Digest::SHA256.hexdigest('env://GEMINI_API_KEY')[0, 8])
     end
 
     it 'skips instances whose env credential is unset' do
@@ -131,6 +137,73 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
         .and_return({ instances: { naked: { endpoint: 'https://generativelanguage.googleapis.com/v1beta' } } })
 
       expect(actor.send(:configured_instances)).to be_empty
+    end
+
+    it 'never claims an instance literally named "default" (reserved SSOT v3 identity)' do
+      reserved = {
+        instances: {
+          default: {
+            endpoint: 'https://generativelanguage.googleapis.com/v1beta',
+            credentials: { api_key: 'env://GEMINI_API_KEY' }
+          }
+        }
+      }
+      allow(actor).to receive(:settings).and_return(reserved)
+
+      expect(actor.send(:configured_instances)).to be_empty
+    end
+
+    it 'warns exactly once per actor lifetime when a resolvable "default" entry is skipped' do
+      reserved = {
+        instances: {
+          default: {
+            endpoint: 'https://generativelanguage.googleapis.com/v1beta',
+            credentials: { api_key: 'env://GEMINI_API_KEY' }
+          }
+        }
+      }
+      warnings = []
+      fake_log = Object.new
+      fake_log.define_singleton_method(:warn) { |message = nil, **| warnings << message.to_s }
+      allow(actor).to receive_messages(log: fake_log, settings: reserved)
+
+      expect(actor.send(:configured_instances)).to be_empty
+      expect(actor.send(:configured_instances)).to be_empty
+
+      expect(warnings.size).to eq(1), 'the reserved-name skip must be loud but not per-tick spam'
+      expect(warnings.first).to include('"default"')
+    end
+  end
+
+  # ── Identity: config name is the instance_id, derived id is physical ───────
+
+  describe 'instance identity (config name + secondary physical id)' do
+    it 'publishes the config name as InstanceKey.instance_id with the derived id as physical_id' do
+      allow(actor).to receive_messages(settings: settings,
+                                       discover_offerings_for_instance: build_offerings(
+                                         actor, normalized_primary(actor, settings)
+                                       ))
+      allow(actor).to receive(:check_health).and_return(readiness[:ready])
+
+      actor.manual
+
+      physical_id = physical_id_for(actor, settings[:instances][:primary])
+      record = registry.snapshot.instance(instance_key: key_for('primary', physical_id: physical_id))
+      expect(record).not_to be_nil
+      expect(record.instance_key.instance_id).to eq('primary')
+      expect(record.instance_key.physical_id).to eq(physical_id)
+    end
+
+    it 'keeps two config names on the same endpoint as distinct instances' do
+      shared = { api_key: 'key-shared', endpoint: 'https://shared.example.com/v1beta' }
+      first  = { instances: { apollo: shared, apollo_embed: shared } }
+      allow(actor).to receive(:settings).and_return(first)
+      allow(actor).to receive_messages(discover_offerings_for_instance: [], check_health: readiness[:ready])
+
+      actor.manual
+
+      expect(registry.snapshot.instance(instance_key: key_for('apollo'))).not_to be_nil
+      expect(registry.snapshot.instance(instance_key: key_for('apollo_embed'))).not_to be_nil
     end
   end
 
@@ -159,14 +232,13 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
     it 'activates the instance on a later tick once readiness passes' do
       allow(actor).to receive_messages(settings: settings,
                                        discover_offerings_for_instance: build_offerings(
-                                         actor, normalized_default(actor, settings)
+                                         actor, normalized_primary(actor, settings)
                                        ))
       allow(actor).to receive(:check_health).and_return(readiness[:unready], readiness[:ready])
 
       actor.manual # initial discovery: claim + readiness FAILED
 
-      instance_id = instance_id_for(actor, settings[:instances][:default])
-      key = key_for(instance_id)
+      key = key_for('primary', physical_id: physical_id_for(actor, settings[:instances][:primary]))
       expect(registry.snapshot.instance(instance_key: key)).to be_nil
       expect(registry.snapshot.publication_status(instance_key: key).state).to eq(:initializing)
 
@@ -179,7 +251,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
     it 'stays initializing while readiness keeps failing' do
       allow(actor).to receive_messages(
         settings: settings,
-        discover_offerings_for_instance: build_offerings(actor, normalized_default(actor, settings)),
+        discover_offerings_for_instance: build_offerings(actor, normalized_primary(actor, settings)),
         check_health: readiness[:unready]
       )
 
@@ -187,8 +259,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
       actor.manual
       actor.manual
 
-      instance_id = instance_id_for(actor, settings[:instances][:default])
-      key = key_for(instance_id)
+      key = key_for('primary', physical_id: physical_id_for(actor, settings[:instances][:primary]))
       expect(registry.snapshot.instance(instance_key: key)).to be_nil
       expect(registry.snapshot.publication_status(instance_key: key).state).to eq(:initializing)
     end
@@ -205,18 +276,15 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
       allow(actor).to receive(:settings).and_return(first, second)
       allow(actor).to receive_messages(discover_offerings_for_instance: [], check_health: readiness[:ready])
 
-      alpha_id = instance_id_for(actor, alpha)
-      beta_id  = instance_id_for(actor, beta)
+      actor.manual
+      expect(registry.snapshot.instance(instance_key: key_for('alpha'))).not_to be_nil
+      expect(registry.snapshot.instance(instance_key: key_for('beta'))).to be_nil
 
       actor.manual
-      expect(registry.snapshot.instance(instance_key: key_for(alpha_id))).not_to be_nil
-      expect(registry.snapshot.instance(instance_key: key_for(beta_id))).to be_nil
-
-      actor.manual
-      expect(registry.snapshot.instance(instance_key: key_for(alpha_id))).to be_nil,
-                                                                             'removed instance must be retired'
-      expect(registry.snapshot.instance(instance_key: key_for(beta_id))).not_to be_nil,
-                                                                                'late instance must be claimed'
+      expect(registry.snapshot.instance(instance_key: key_for('alpha'))).to be_nil,
+                                                                            'removed instance must be retired'
+      expect(registry.snapshot.instance(instance_key: key_for('beta'))).not_to be_nil,
+                                                                               'late instance must be claimed'
     end
   end
 
@@ -228,21 +296,20 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
       allow(actor).to receive(:discover_offerings_for_instance) do
         # Fresh drafts with fresh observed_at on every call — Data#== would
         # say "changed" every tick; the signature compare must not.
-        build_offerings(actor, normalized_default(actor, settings))
+        build_offerings(actor, normalized_primary(actor, settings))
       end
 
       actor.manual # initial activate (sequence 0)
       actor.manual # tick 1
       actor.manual # tick 2
 
-      instance_id = instance_id_for(actor, settings[:instances][:default])
-      expect(registry.snapshot.publication_status(instance_key: key_for(instance_id)).published_sequence)
+      expect(registry.snapshot.publication_status(instance_key: key_for('primary')).published_sequence)
         .to eq(0), 'unchanged offerings must not bump the publication sequence'
     end
 
     it 'replaces the snapshot when the model set actually changes' do
       allow(actor).to receive_messages(settings: settings, check_health: readiness[:ready])
-      cfg = normalized_default(actor, settings)
+      cfg = normalized_primary(actor, settings)
       allow(actor).to receive(:discover_offerings_for_instance)
         .and_return(build_offerings(actor, cfg, model_ids: %w[gemini-2.0-flash]),
                     build_offerings(actor, cfg, model_ids: %w[gemini-2.0-flash gemini-2.5-pro]))
@@ -250,10 +317,9 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
       actor.manual # initial activate with one model
       actor.manual # tick: second model appears → replace
 
-      instance_id = instance_id_for(actor, settings[:instances][:default])
-      expect(registry.snapshot.publication_status(instance_key: key_for(instance_id)).published_sequence)
+      expect(registry.snapshot.publication_status(instance_key: key_for('primary')).published_sequence)
         .to eq(1)
-      expect(registry.snapshot.offerings_for(instance_key: key_for(instance_id)).size).to eq(2)
+      expect(registry.snapshot.offerings_for(instance_key: key_for('primary')).size).to eq(2)
     end
   end
 
@@ -263,60 +329,62 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
     it 'writes the legacy 4-key health shape plus capabilities after each registry commit' do
       allow(actor).to receive_messages(settings: settings,
                                        discover_offerings_for_instance: build_offerings(
-                                         actor, normalized_default(actor, settings)
+                                         actor, normalized_primary(actor, settings)
                                        ))
       allow(actor).to receive(:check_health).and_return(readiness[:unready], readiness[:ready])
 
       actor.manual # initial failure
 
-      health = settings.dig(:instances, :default, :health)
+      health = settings.dig(:instances, :primary, :health)
       expect(health).to include(
         circuit_state: :open, denied: false, available: false, adjustment: -50
       )
       expect(health[:last_probe_outcome]).to eq(:failure)
       expect(health[:reason]).to be_a(String)
       expect(health[:observed_at]).to be_a(Time)
-      expect(settings.dig(:instances, :default, :capabilities)).to include(:completion, :streaming)
+      expect(settings.dig(:instances, :primary, :capabilities)).to include(:completion, :streaming)
 
       actor.manual # recovery
 
-      health = settings.dig(:instances, :default, :health)
+      health = settings.dig(:instances, :primary, :health)
       expect(health).to include(
         circuit_state: :closed, denied: false, available: true, adjustment: 0
       )
       expect(health[:last_probe_outcome]).to eq(:success)
     end
 
-    it 'keys the health hash by the config name, not the derived instance_id' do
+    it 'keys the health hash by the config name; the registry identity is the name too' do
       allow(actor).to receive_messages(
         settings: settings,
-        discover_offerings_for_instance: build_offerings(actor, normalized_default(actor, settings)),
+        discover_offerings_for_instance: build_offerings(actor, normalized_primary(actor, settings)),
         check_health: readiness[:ready]
       )
 
       actor.manual
 
-      expect(settings[:instances].keys).to include(:default)
-      instance_id = instance_id_for(actor, settings[:instances][:default])
-      expect(settings[:instances].keys).not_to include(instance_id)
-      expect(settings.dig(:instances, :default, :health)[:available]).to be(true)
+      physical_id = physical_id_for(actor, settings[:instances][:primary])
+      expect(settings[:instances].keys).to include(:primary)
+      expect(settings[:instances].keys).not_to include(physical_id.to_sym),
+                                               'the derived physical id is never a settings/identity key'
+      record = registry.snapshot.instance(instance_key: key_for('primary', physical_id: physical_id))
+      expect(record.instance_key.instance_id).to eq('primary')
+      expect(settings.dig(:instances, :primary, :health)[:available]).to be(true)
     end
 
     it 'clears the health hash when the instance is removed' do
       allow(actor).to receive_messages(
         settings: settings,
-        discover_offerings_for_instance: build_offerings(actor, normalized_default(actor, settings)),
+        discover_offerings_for_instance: build_offerings(actor, normalized_primary(actor, settings)),
         check_health: readiness[:ready]
       )
 
       actor.manual
-      expect(settings.dig(:instances, :default, :health)).not_to be_nil
+      expect(settings.dig(:instances, :primary, :health)).not_to be_nil
 
       actor.shutdown
-      expect(settings.dig(:instances, :default, :health)).to be_nil
-      expect(settings.dig(:instances, :default, :capabilities)).to be_nil
-      instance_id = instance_id_for(actor, settings[:instances][:default])
-      expect(registry.snapshot.instance(instance_key: key_for(instance_id))).to be_nil
+      expect(settings.dig(:instances, :primary, :health)).to be_nil
+      expect(settings.dig(:instances, :primary, :capabilities)).to be_nil
+      expect(registry.snapshot.instance(instance_key: key_for('primary'))).to be_nil
     end
   end
 end

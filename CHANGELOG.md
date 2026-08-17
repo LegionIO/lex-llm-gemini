@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.4.3] - 2026-08-17
+
+### Changed
+- **SSOT v3 fail-forward instance identity** - Instance identity is now the operator's config
+  name (the key under `settings[:instances]`), published as `InstanceKey.instance_id`. The derived
+  `host:port/ak:<8-char-SHA256-fingerprint>` id is demoted to the secondary `InstanceKey.physical_id`
+  (dedup and diagnostics only; it never participates in identity). Two config names pointing at the
+  same endpoint are now distinct instances.
+- Every inventory publisher call threads the secondary `physical_id:` alongside `instance_id:`
+  (`claim_instance`, `readiness_probe_started`, `readiness_succeeded`, `readiness_failed`,
+  `activate_instance_snapshot`, `replace_instance_snapshot`, `remove_instance`).
+- An instance config entry literally named `default` is never claimed: `default` is a reserved SSOT
+  v3 instance identity that `Identity::InstanceKey` rejects, so the always-present synthetic
+  provider_settings template can never be published under name-based identity. The skip is
+  unconditional (every tick) and warns once per actor lifetime.
+- Embedding-only models (whose `supportedGenerationMethods` contain only `embedContent`) publish
+  `chat: :unsupported` and `stream_chat: :unsupported` alongside `embed: :supported`, so they are
+  never routed to chat/completion traffic.
+
+### Dependencies
+- Raise `lex-llm` floor from `>= 0.7.0` to `>= 0.7.1` (SSOT v3 fail-forward `InstanceKey` with
+  secondary `physical_id`).
+
 ## [0.4.2] - 2026-08-13
 
 ### Fixed
