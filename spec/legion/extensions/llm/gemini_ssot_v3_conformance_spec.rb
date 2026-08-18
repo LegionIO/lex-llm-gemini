@@ -388,12 +388,12 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   # ─── No default model or provider ──────────────────────────────────────────
 
   describe 'no default model or provider' do
-    it 'rejects instance_id "default" as reserved' do
-      expect do
-        Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-          provider_family: :gemini, instance_id: 'default'
-        )
-      end.to raise_error(Legion::Extensions::Llm::Inventory::Errors::ValidationError)
+    it 'accepts instance_id "default"' do
+      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :gemini, instance_id: 'default'
+      )
+
+      expect(key.instance_id).to eq('default')
     end
 
     it 'rejects nil instance_id' do
