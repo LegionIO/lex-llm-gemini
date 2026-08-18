@@ -19,6 +19,11 @@
   `chat: :unsupported` and `stream_chat: :unsupported` alongside `embed: :supported`, so they are
   never routed to chat/completion traffic.
 
+### Fixed
+- **Single actor registration** - The provider module no longer extends `Core` at file level, so the
+  boot-time submodule walk skips it and the gem's own top-level extension load is the sole actor
+  registration (eliminates the double-claim / `FencedPublisherError`).
+
 ### Dependencies
 - Raise `lex-llm` floor from `>= 0.7.0` to `>= 0.7.1` (SSOT v3 fail-forward `InstanceKey` with
   secondary `physical_id`).

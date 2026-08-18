@@ -11,7 +11,6 @@ module Legion
     module Llm
       # Gemini provider extension namespace.
       module Gemini
-        extend ::Legion::Extensions::Core
         extend Legion::Logging::Helper
         extend Legion::Extensions::Llm::AutoRegistration
 
