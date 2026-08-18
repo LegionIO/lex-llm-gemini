@@ -6,127 +6,26 @@ module Legion
   module Extensions
     module Llm
       module Gemini
-        # Gemini provider implementation for the Legion::Extensions::Llm base provider contract.
-        class Provider < Legion::Extensions::Llm::Provider # rubocop:disable Metrics/ClassLength
-          include Legion::Logging::Helper
-
-          class << self
-            attr_writer :registry_publisher
-
-            def slug = 'gemini'
-            def configuration_options = %i[gemini_api_key gemini_api_base]
-            def configuration_requirements = %i[gemini_api_key]
-            def capabilities = Capabilities
-
-            def registry_publisher
-              @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :gemini)
-            end
-          end
-
-          # Capability predicates for Gemini API models.
-          module Capabilities
-            module_function
-
-            def chat?(model) = supported?(model, 'generateContent')
-            def streaming?(model) = supported?(model, 'streamGenerateContent')
-            def embeddings?(model) = supported?(model, 'embedContent')
-            def vision?(model) = chat?(model) && model_id(model).match?(/gemini|flash|pro/)
-            def functions?(model) = chat?(model)
-
-            # Emit canonical capability vocabulary (see Legion::Extensions::Llm::Capabilities::CANONICAL).
-            # Model::Info retains both raw and canonical forms, so aliases like :embeddings/:function_calling
-            # would otherwise leak duplicate tokens into the capability list.
-            def critical_capabilities_for(model)
-              [
-                ('streaming' if streaming?(model)),
-                ('embedding' if embeddings?(model)),
-                ('tools' if functions?(model)),
-                ('vision' if vision?(model))
-              ].compact
-            end
-
-            def supported?(model, action)
-              methods = generation_methods(model)
-              return model_id(model).include?('embedding') if action == 'embedContent' && methods.empty?
-              return true if methods.empty? && action != 'embedContent'
-
-              methods.include?(action)
-            end
-
-            def generation_methods(model)
-              metadata = metadata_for(model)
-              Array(metadata[:supported_generation_methods] || metadata['supported_generation_methods'] ||
-                    metadata['supportedGenerationMethods'])
-            end
-
-            def model_id(model)
-              return model.fetch('name', '').delete_prefix('models/') if model.is_a?(Hash)
-
-              model.respond_to?(:id) ? model.id.to_s : model.to_s
-            end
-
-            def metadata_for(model)
-              return model if model.is_a?(Hash)
-              return model.metadata if model.respond_to?(:metadata)
-
-              {}
-            end
-          end
-
-          def settings
-            Gemini.default_settings
-          end
-
-          def api_base
-            config.gemini_api_base || settings[:endpoint] || 'https://generativelanguage.googleapis.com/v1beta'
-          end
-
-          def headers
-            identity_headers.merge('x-goog-api-key' => config.gemini_api_key)
-          end
-
-          def completion_url = generate_content_url(model: @model)
-          def stream_url = stream_generate_content_url(model: @model)
-          def models_url = 'models'
-          def embedding_url(model:) = embed_content_url(model:)
-
-          def generate_content_url(model:)
-            "#{model_path(model)}:generateContent"
-          end
-
-          def stream_generate_content_url(model:)
-            "#{model_path(model)}:streamGenerateContent?alt=sse"
-          end
-
-          def embed_content_url(model:)
-            "#{model_path(model)}:embedContent"
-          end
-
-          def list_models(**)
-            log.info { 'listing available Gemini models' }
-            super.tap do |models|
-              log.info { "discovered #{models.size} Gemini model(s); publishing to registry" }
-              self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
-            end
-          end
-
+        # Message formatting helpers mixed into Provider.
+        module MessageFormatter
           private
 
-          def model_path(model)
-            value = model.respond_to?(:id) ? model.id : model.to_s
-            value.start_with?('models/') ? value : "models/#{value}"
+          def render_payload(messages, **opts)
+            model       = opts.fetch(:model)
+            tools       = opts.fetch(:tools)
+            temperature = opts.fetch(:temperature)
+            @model      = model.id
+            build_request_payload(messages: messages, tools: tools, temperature: temperature,
+                                  schema: opts[:schema], tool_prefs: opts[:tool_prefs])
           end
 
-          # rubocop:disable Metrics/ParameterLists,Lint/UnusedMethodArgument
-          def render_payload(messages, tools:, temperature:, model:, stream:, schema:, thinking:, tool_prefs:)
-            @model = model.id
+          def build_request_payload(messages:, tools:, temperature:, schema:, tool_prefs:)
             payload = { contents: format_messages(messages), generationConfig: generation_config(temperature, schema) }
             payload[:systemInstruction] = system_instruction(messages)
             payload[:tools] = format_tools(tools) unless tools.empty?
             payload[:toolConfig] = tool_config(tool_prefs) if tool_prefs
             payload.compact
           end
-          # rubocop:enable Metrics/ParameterLists,Lint/UnusedMethodArgument
 
           def generation_config(temperature, schema)
             {
@@ -190,7 +89,6 @@ module Legion
           end
 
           def tool_call_parts(message)
-            # Array is canonical (name-keyed hashes dropped parallel same-name calls)
             calls = message.tool_calls.is_a?(Hash) ? message.tool_calls.values : Array(message.tool_calls)
             calls.map do |tool_call|
               { functionCall: { name: tool_call.name, args: tool_call.arguments } }
@@ -225,6 +123,16 @@ module Legion
 
             { functionCallingConfig: { mode: choice.to_s } }
           end
+
+          def model_path(model)
+            value = model.respond_to?(:id) ? model.id : model.to_s
+            value.start_with?('models/') ? value : "models/#{value}"
+          end
+        end
+
+        # Response parsing helpers mixed into Provider.
+        module ResponseParser
+          private
 
           def parse_completion_response(response)
             body = response.body
@@ -315,7 +223,27 @@ module Legion
             end
           end
 
-          # -- policy resolution requires many sources
+          def render_embedding_payload(text, model:, dimensions:)
+            {
+              model: model_path(model),
+              content: { parts: [{ text: text.to_s }] },
+              outputDimensionality: dimensions
+            }.compact
+          end
+
+          def parse_embedding_response(response, model:, **)
+            Legion::Extensions::Llm::Embedding.new(
+              vectors: response.body.dig('embedding', 'values'),
+              model: model,
+              input_tokens: response.body.dig('usageMetadata', 'promptTokenCount').to_i
+            )
+          end
+        end
+
+        # Offering and capability building helpers mixed into Provider.
+        module OfferingBuilder
+          private
+
           def offering_from_model(model, health: {})
             policy = Legion::Extensions::Llm::CapabilityPolicy.resolve(
               real: real_capabilities_from(model),
@@ -354,13 +282,13 @@ module Legion
             {
               streaming: methods.include?('streamGenerateContent'),
               embedding: methods.include?('embedContent'),
-              vision: Capabilities.vision?(meta.merge('name' => "models/#{model.id}"))
+              vision: Legion::Extensions::Llm::Gemini::Provider::Capabilities.vision?(
+                meta.merge('name' => "models/#{model.id}")
+              )
             }.compact
           end
 
           def provider_capability_config
-            return {} unless defined?(Legion::Extensions::Llm::CredentialSources)
-
             conf = Legion::Extensions::Llm::CredentialSources.setting(:extensions, :llm, :gemini)
             conf.is_a?(Hash) ? conf.to_h.except(:instances, 'instances') : {}
           rescue StandardError => e
@@ -369,16 +297,13 @@ module Legion
           end
 
           def instance_capability_config
-            return {} unless config.respond_to?(:to_h)
-
             config.to_h.slice(*Legion::Extensions::Llm::Provider::CAPABILITY_CONFIG_KEYS)
           end
 
           def model_capability_config(model_id)
-            models_conf = resolve_models_config
-            return {} unless models_conf.respond_to?(:to_h)
+            hash = resolve_models_config
+            return {} unless hash.is_a?(Hash)
 
-            hash = models_conf.to_h
             hash[model_id.to_s] || hash[model_id.to_sym] || {}
           rescue StandardError => e
             handle_exception(e, level: :warn, handled: true, operation: 'gemini.model_capability_config')
@@ -386,11 +311,9 @@ module Legion
           end
 
           def resolve_models_config
-            return config.models if config.respond_to?(:models)
-            return config[:models] if config.respond_to?(:[])
-
-            nil
-          rescue StandardError
+            config.to_h[:models]
+          rescue StandardError => e
+            handle_exception(e, level: :warn, handled: true, operation: 'gemini.resolve_models_config')
             nil
           end
 
@@ -399,21 +322,105 @@ module Legion
 
             [%w[text image audio video], %w[text]]
           end
+        end
 
-          def render_embedding_payload(text, model:, dimensions:)
-            {
-              model: model_path(model),
-              content: { parts: [{ text: text.to_s }] },
-              outputDimensionality: dimensions
-            }.compact
+        # Gemini provider implementation for the Legion::Extensions::Llm base provider contract.
+        class Provider < Legion::Extensions::Llm::Provider
+          include Legion::Logging::Helper
+          include MessageFormatter
+          include ResponseParser
+          include OfferingBuilder
+
+          class << self
+            def slug = 'gemini'
+            def configuration_options = %i[gemini_api_key gemini_api_base]
+            def configuration_requirements = %i[gemini_api_key]
+            def capabilities = Capabilities
           end
 
-          def parse_embedding_response(response, model:, **)
-            Legion::Extensions::Llm::Embedding.new(
-              vectors: response.body.dig('embedding', 'values'),
-              model: model,
-              input_tokens: response.body.dig('usageMetadata', 'promptTokenCount').to_i
-            )
+          # Capability predicates for Gemini API models.
+          module Capabilities
+            module_function
+
+            def chat?(model) = supported?(model, 'generateContent')
+            def streaming?(model) = supported?(model, 'streamGenerateContent')
+            def embeddings?(model) = supported?(model, 'embedContent')
+            def vision?(model) = chat?(model) && model_id(model).match?(/gemini|flash|pro/)
+            def functions?(model) = chat?(model)
+
+            def critical_capabilities_for(model)
+              [
+                ('streaming' if streaming?(model)),
+                ('embedding' if embeddings?(model)),
+                ('tools' if functions?(model)),
+                ('vision' if vision?(model))
+              ].compact
+            end
+
+            # When generation methods are absent, treat all capabilities as unknown
+            # (unknown = unsupported for selection). Only fall back to name heuristic
+            # for embedContent to preserve legacy embedding detection.
+            def supported?(model, action)
+              methods = generation_methods(model)
+              return model_id(model).include?('embedding') if methods.empty?
+
+              methods.include?(action)
+            end
+
+            def generation_methods(model)
+              metadata = metadata_for(model)
+              Array(metadata[:supported_generation_methods] || metadata['supported_generation_methods'] ||
+                    metadata['supportedGenerationMethods'])
+            end
+
+            def model_id(model)
+              return model.fetch('name', '').delete_prefix('models/') if model.is_a?(Hash)
+
+              model.respond_to?(:id) ? model.id.to_s : model.to_s
+            end
+
+            def metadata_for(model)
+              return model if model.is_a?(Hash)
+              return model.metadata if model.respond_to?(:metadata)
+
+              {}
+            end
+          end
+
+          def settings
+            Gemini.default_settings
+          end
+
+          def api_base
+            config.gemini_api_base || settings[:instances][:default][:endpoint]
+          end
+
+          def headers
+            identity_headers.merge('x-goog-api-key' => config.gemini_api_key)
+          end
+
+          def completion_url = generate_content_url(model: @model)
+          def stream_url = stream_generate_content_url(model: @model)
+          def models_url = 'models'
+          def embedding_url(model:) = embed_content_url(model:)
+
+          def generate_content_url(model:)
+            "#{model_path(model)}:generateContent"
+          end
+
+          def stream_generate_content_url(model:)
+            "#{model_path(model)}:streamGenerateContent?alt=sse"
+          end
+
+          def embed_content_url(model:)
+            "#{model_path(model)}:embedContent"
+          end
+
+          def list_models(**)
+            log.info { 'listing available Gemini models' }
+            super.tap do |models|
+              log.info { "discovered #{models.size} Gemini model(s)" }
+            end
           end
         end
       end

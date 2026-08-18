@@ -1,5 +1,112 @@
 # Changelog
 
+## [0.4.4] - 2026-08-18
+
+### Fixed
+- Remove synthetic-default discovery filtering and its once-per-boot warning; configured discovery now passes every instance entry through the normal claimability checks.
+
+## [0.4.3] - 2026-08-17
+
+### Changed
+- **SSOT v3 fail-forward instance identity** - Instance identity is now the operator's config
+  name (the key under `settings[:instances]`), published as `InstanceKey.instance_id`. The derived
+  `host:port/ak:<8-char-SHA256-fingerprint>` id is demoted to the secondary `InstanceKey.physical_id`
+  (dedup and diagnostics only; it never participates in identity). Two config names pointing at the
+  same endpoint are now distinct instances.
+- Every inventory publisher call threads the secondary `physical_id:` alongside `instance_id:`
+  (`claim_instance`, `readiness_probe_started`, `readiness_succeeded`, `readiness_failed`,
+  `activate_instance_snapshot`, `replace_instance_snapshot`, `remove_instance`).
+- An instance config entry literally named `default` is never claimed: `default` is a reserved SSOT
+  v3 instance identity that `Identity::InstanceKey` rejects, so the always-present synthetic
+  provider_settings template can never be published under name-based identity. The skip is
+  unconditional (every tick) and warns once per actor lifetime.
+- Embedding-only models (whose `supportedGenerationMethods` contain only `embedContent`) publish
+  `chat: :unsupported` and `stream_chat: :unsupported` alongside `embed: :supported`, so they are
+  never routed to chat/completion traffic.
+
+### Fixed
+- **Single actor registration** - The provider module no longer extends `Core` at file level, so the
+  boot-time submodule walk skips it and the gem's own top-level extension load is the sole actor
+  registration (eliminates the double-claim / `FencedPublisherError`).
+
+### Dependencies
+- Raise `lex-llm` floor from `>= 0.7.0` to `>= 0.7.1` (SSOT v3 fail-forward `InstanceKey` with
+  secondary `physical_id`).
+
+## [0.4.2] - 2026-08-13
+
+### Fixed
+- **§1 rubocop disables — second remediation pass**: Removed all remaining inline
+  `# rubocop:disable` directives from `provider.rb`, `gemini.rb`, and spec files.
+  Resolved `Metrics/ClassLength` by extracting `MessageFormatter`, `ResponseParser`, and
+  `OfferingBuilder` as sibling modules outside the `Provider` class body; resolved
+  `Metrics/ParameterLists`/`Lint/UnusedMethodArgument` on `render_payload` by switching to
+  `**opts` with explicit `fetch`/`[]` extraction and splitting assembly into `build_request_payload`;
+  resolved `Metrics/AbcSize` on `normalize_instance_config` by extracting `symbolize_config_keys`,
+  `promote_api_key`, and `promote_api_base` helpers.
+- **§1 spec file path format**: Moved `capability_policy_spec.rb` to
+  `provider_capability_policy_spec.rb` and `actors/fleet_worker_spec.rb` to
+  `actor/fleet_worker_spec.rb` so paths satisfy `RSpec/SpecFilePathFormat`.
+- **§provider-plan blanket chat support**: `Capabilities#supported?` no longer returns `true`
+  for all non-embedding actions when `supportedGenerationMethods` is empty; an absent method
+  list is now treated as unknown/unsupported for all actions except the embedding name heuristic.
+- **§2 second publication engine removed**: Deleted `registry_publisher` class method and
+  `attr_writer :registry_publisher` from `Provider`; removed all associated spec assertions.
+- **§1 settings guards**: Removed chained `||` fallback in `api_base`; removed `defined?`
+  guard in `provider_capability_config`; removed `respond_to?` guards in
+  `instance_capability_config`, `model_capability_config`, and `resolve_models_config`.
+- **§1 swallowed rescues**: All `rescue` blocks in `provider.rb` and `discovery_refresh.rb`
+  now call `handle_exception`; removed silent `rescue StandardError; nil` in
+  `resolve_models_config`; `extract_host_port` and `check_health` rescue blocks now log via
+  `handle_exception` before returning degraded values.
+- **§1 stdlib warn**: Replaced `warn(e.message) if $VERBOSE` in `LoadError` rescue blocks
+  with silent rescues (the error is not actionable at file-load time and the defined-guard
+  below provides the correct gating behavior).
+
+## [0.4.1] - 2026-08-13
+
+### Fixed
+- **§8 health firewall**: `GeminiCallable#normalize_dispatch_error` now maps only an explicit
+  Gemini `"status":"UNAVAILABLE"` response body to `:instance_unavailable`. Connection failures,
+  timeouts, generic 5xx, 429, auth, and all other transient errors remain request-local and never
+  mutate global instance availability.
+- **§2 single publication engine**: Removed legacy `RegistryPublisher#publish_models_async` call
+  from `Provider#list_models`. Discovery actor via `Inventory::Publisher` is now the sole
+  publication path.
+- **§1 settings guards**: Replaced `settings[:discovery_interval] || self.class.every_seconds`,
+  `settings.dig(:credentials, :api_key)`, `settings[:endpoint] || ...`, and `settings[:tier] || ...`
+  with direct registered-default access (`settings[:key]`).
+- **§1 rubocop disables**: Removed all inline rubocop:disable annotations; resolved underlying
+  `Metrics/ClassLength` by extracting private methods into helper modules
+  (`EvidenceBuilder`, `ValueEvidenceBuilder`, `ModelDiscovery`, `ConfigResolver`, `HttpClient`,
+  `ProbeRunner`, `HealthChecker`, `InstanceLifecycle`); resolved `Metrics/AbcSize` on
+  `claim_and_activate_instance` by splitting into focused helpers; resolved swallowed
+  `rescue nil` patterns in `run_cadence_probe` and `handle_reactive_probe` with proper
+  `begin/rescue/handle_exception` blocks.
+- **§11 conformance spec**: Replaced tautological `empty generation methods` test with a real
+  assertion that calls the actor's `build_operation_evidence` method directly.
+
+## [0.4.0] - 2026-08-13
+
+### Changed
+- **SSOT v3 provider migration** - Complete rewrite of the discovery actor to use the
+  Inventory::Publisher/Registry contract. Replaces the old ScopedRefresher/Legion::LLM::Call::Registry
+  discovery mechanism with exact-instance publication via InstanceKey, OfferingDraft snapshots,
+  non-billable readiness probes, and normalized ProviderOutcome error classification.
+- Introduce GeminiCallable wrapper implementing `disconnect` and `normalize_dispatch_error(error:)`
+  contracts required by the SSOT v3 routing layer.
+- Derive instance identity as `host:port/ak:<8-char-SHA256-fingerprint>` for API-key-based isolation.
+- Operation evidence derived from Gemini `supportedGenerationMethods` array (`:provider_catalog` source).
+- Readiness probing via `GET models?pageSize=1` (non-billable, no inference).
+- Support coalesced reactive probes after dispatch-triggered `instance_unavailable` transitions.
+
+### Removed
+- `default_model: 'gemini-2.0-flash'` fallback from provider settings (SSOT v3 requires explicit
+  model selection; no default model or provider inference).
+
+### Dependencies
+- Raise `lex-llm` floor from `>= 0.6.0` to `>= 0.7.0`.
+
 ## [0.3.18] - 2026-08-04
 
 ### Changed

@@ -5,7 +5,6 @@ require 'spec_helper'
 RSpec.describe Legion::Extensions::Llm::Gemini do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
   let(:flash_model) { Legion::Extensions::Llm::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini) }
-  let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
 
   before do
     Legion::Extensions::Llm.config.gemini_api_key = 'test-key'
@@ -18,7 +17,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(settings[:enabled]).to be true
     expect(settings[:provider_family]).to eq(:gemini)
     expect(instance[:endpoint]).to eq('https://generativelanguage.googleapis.com/v1beta')
-    expect(instance[:default_model]).to eq('gemini-2.0-flash')
+    expect(instance).not_to have_key(:default_model)
     expect(instance.dig(:credentials, :api_key)).to eq('env://GEMINI_API_KEY')
     expect(instance.dig(:fleet, :respond_to_requests)).to be false
     expect(instance.dig(:usage, :embedding)).to be true
@@ -60,31 +59,12 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(models.last.modalities.to_h).to eq(input: ['text'], output: ['embeddings'])
   end
 
-  it 'publishes discovered models asynchronously through the base registry publisher' do
-    stub_registry_publisher
-    stub_model_discovery
-
-    models = provider.list_models
-
-    expect_registry_publish(models)
-  end
-
-  it 'builds sanitized lex-llm registry events for Gemini model availability' do
-    events = capture_registry_events([flash_model], readiness: { ready: true })
-
-    expect(events.first.to_h).to include(event_type: :offering_available)
-    expect(events.first.to_h.dig(:offering, :provider_family)).to eq(:gemini)
-    expect(events.first.to_h.dig(:offering, :model)).to eq('gemini-2.0-flash')
+  it 'does not expose a registry_publisher class method on Provider (§2 single engine)' do
+    expect(described_class::Provider).not_to respond_to(:registry_publisher)
   end
 
   it 'parses Gemini embedding responses' do
     expect([embedding.vectors, embedding.input_tokens]).to eq([[0.1, 0.2], 2])
-  end
-
-  it 'uses the base RegistryPublisher parameterized with :gemini' do
-    publisher = described_class::Provider.registry_publisher
-    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
-    expect(publisher.provider_family).to eq(:gemini)
   end
 
   describe '.discover_instances' do
@@ -200,28 +180,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     Struct.new(:body).new(body)
   end
 
-  def stub_registry_publisher
-    allow(described_class::Provider).to receive(:registry_publisher).and_return(registry_publisher)
-    allow(registry_publisher).to receive(:publish_models_async)
-  end
-
   def stub_model_discovery
     allow(provider.connection).to receive(:get).with('models').and_return(fake_response(models_response_body))
-  end
-
-  def expect_registry_publish(models)
-    expect(registry_publisher).to have_received(:publish_models_async)
-      .with(models, readiness: hash_including(provider: :gemini, live: false))
-  end
-
-  def capture_registry_events(models, readiness:)
-    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :gemini)
-    events = []
-    allow(publisher).to receive(:publishing_available?).and_return(true)
-    allow(publisher).to receive(:publish_event) { |event| events << event }
-    allow(publisher).to receive(:schedule).and_yield
-    publisher.publish_models_async(models, readiness:)
-    events
   end
 
   def generation_url

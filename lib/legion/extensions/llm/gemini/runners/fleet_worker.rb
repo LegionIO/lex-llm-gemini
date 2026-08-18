@@ -9,17 +9,23 @@ module Legion
       module Gemini
         module Runners
           # Runner entrypoint for Gemini fleet request execution.
+          #
+          # The Subscription dispatch path invokes this as
+          # runner_class.send(fn, **message) where message is the fleet
+          # request envelope merged with transport metadata (routing_key,
+          # message_id, headers, ...). The responder parses the envelope out
+          # of that hash; unknown keys are inert.
           module FleetWorker
             module_function
 
-            def handle_fleet_request(payload, delivery: nil, properties: nil)
+            def handle_fleet_request(**opts)
               Legion::Extensions::Llm::Fleet::ProviderResponder.call(
-                payload: payload,
+                payload: opts,
                 provider_family: Gemini::PROVIDER_FAMILY,
                 provider_class: Gemini::Provider,
                 provider_instances: -> { Gemini.discover_instances },
-                delivery: delivery,
-                properties: properties
+                delivery: opts[:delivery],
+                properties: opts[:properties]
               )
             end
           end

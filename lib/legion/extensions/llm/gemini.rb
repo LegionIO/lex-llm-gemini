@@ -3,7 +3,7 @@
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/gemini/provider'
 require 'legion/extensions/llm/gemini/version'
-require_relative 'gemini/actors/discovery_refresh'
+require 'legion/extensions/llm/gemini/actors/discovery_refresh'
 
 module Legion
   module Extensions
@@ -11,7 +11,6 @@ module Legion
     module Llm
       # Gemini provider extension namespace.
       module Gemini
-        extend ::Legion::Extensions::Core if ::Legion::Extensions.const_defined?(:Core, false)
         extend Legion::Logging::Helper
         extend Legion::Extensions::Llm::AutoRegistration
 
@@ -22,7 +21,7 @@ module Legion
             family: PROVIDER_FAMILY,
             instance: {
               endpoint: 'https://generativelanguage.googleapis.com/v1beta',
-              default_model: 'gemini-2.0-flash',
+              discovery_interval: 3600,
               tier: :frontier,
               transport: :http,
               credentials: { api_key: 'env://GEMINI_API_KEY' },
@@ -88,13 +87,25 @@ module Legion
           end
         end
 
-        def self.normalize_instance_config(config) # rubocop:disable Metrics/AbcSize
-          normalized = config.to_h.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
+        def self.normalize_instance_config(config)
+          normalized = symbolize_config_keys(config)
+          promote_api_key(normalized)
+          promote_api_base(normalized)
+          normalized.compact.except(:instances)
+        end
+
+        def self.symbolize_config_keys(config)
+          config.to_h.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
+        end
+
+        def self.promote_api_key(normalized)
           normalized[:gemini_api_key] ||= normalized.delete(:api_key)
+        end
+
+        def self.promote_api_base(normalized)
           normalized[:gemini_api_base] ||= normalized.delete(:base_url)
           normalized[:gemini_api_base] ||= normalized.delete(:api_base)
           normalized[:gemini_api_base] ||= normalized.delete(:endpoint)
-          normalized.compact.except(:instances)
         end
 
         def self.sanitize_instance_config(config)
@@ -103,6 +114,7 @@ module Legion
 
         private_class_method :discover_from_env, :discover_from_settings,
                              :add_settings_api_key, :add_settings_instances, :normalize_instance_config,
+                             :symbolize_config_keys, :promote_api_key, :promote_api_base,
                              :sanitize_instance_config
 
         Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)

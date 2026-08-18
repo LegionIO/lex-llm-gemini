@@ -3,7 +3,7 @@
 require 'spec_helper'
 require 'legion/extensions/llm/gemini/provider'
 
-RSpec.describe Legion::Extensions::Llm::Gemini::Provider do # rubocop:disable RSpec/SpecFilePathFormat
+RSpec.describe Legion::Extensions::Llm::Gemini::Provider do
   describe 'CapabilityPolicy integration' do
     let(:provider) { described_class.new(gemini_api_key: 'test-key') }
 
