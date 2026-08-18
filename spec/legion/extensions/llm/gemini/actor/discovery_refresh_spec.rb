@@ -139,39 +139,50 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
       expect(actor.send(:configured_instances)).to be_empty
     end
 
-    it 'never claims an instance literally named "default" (reserved SSOT v3 identity)' do
-      reserved = {
-        instances: {
-          default: {
-            endpoint: 'https://generativelanguage.googleapis.com/v1beta',
-            credentials: { api_key: 'env://GEMINI_API_KEY' }
-          }
-        }
-      }
-      allow(actor).to receive(:settings).and_return(reserved)
+    it 'skips an unmodified synthetic "default" template even when its placeholder resolves' do
+      # The GEMINI_API_KEY env var IS set (around hook), so the template's
+      # env://GEMINI_API_KEY placeholder would resolve to a real key — the
+      # skip must key off the unmodified template shape, not the name.
+      template = Legion::Extensions::Llm::Gemini.default_settings.dig(:instances, :default)
+      allow(actor).to receive(:settings).and_return({ instances: { default: template } })
 
       expect(actor.send(:configured_instances)).to be_empty
     end
 
-    it 'warns exactly once per actor lifetime when a resolvable "default" entry is skipped' do
-      reserved = {
-        instances: {
-          default: {
-            endpoint: 'https://generativelanguage.googleapis.com/v1beta',
-            credentials: { api_key: 'env://GEMINI_API_KEY' }
-          }
-        }
-      }
+    it 'warns exactly once per actor lifetime when the unmodified "default" template is skipped' do
+      template = Legion::Extensions::Llm::Gemini.default_settings.dig(:instances, :default)
       warnings = []
       fake_log = Object.new
       fake_log.define_singleton_method(:warn) { |message = nil, **| warnings << message.to_s }
-      allow(actor).to receive_messages(log: fake_log, settings: reserved)
+      allow(actor).to receive_messages(log: fake_log, settings: { instances: { default: template } })
 
       expect(actor.send(:configured_instances)).to be_empty
       expect(actor.send(:configured_instances)).to be_empty
 
-      expect(warnings.size).to eq(1), 'the reserved-name skip must be loud but not per-tick spam'
+      expect(warnings.size).to eq(1), 'the template skip must be loud but not per-tick spam'
       expect(warnings.first).to include('"default"')
+    end
+
+    it 'does not skip a configured "default" (real API key) — provider-layer claimable set' do
+      # v2 parity: 'default' is an ordinary instance label once the operator
+      # has actually configured the entry. This asserts the PROVIDER-LAYER
+      # decision (configured_instances) only — a full claim through
+      # InstanceKey is out of scope here (lex-llm 0.7.2 still reserves the
+      # name; the 0.7.3 relaxation is in flight and unpublished).
+      configured = {
+        instances: {
+          default: {
+            endpoint: 'https://generativelanguage.googleapis.com/v1beta',
+            credentials: { api_key: 'AIzaSyConfiguredDefault' }
+          }
+        }
+      }
+      allow(actor).to receive(:settings).and_return(configured)
+
+      instances = actor.send(:configured_instances)
+
+      expect(instances).to have_key(:default)
+      expect(instances[:default][:gemini_api_key]).to eq('AIzaSyConfiguredDefault')
     end
   end
 

@@ -260,40 +260,67 @@ module Legion
             end
 
             # Returns the normalized config when the entry is claimable, else
-            # nil: it needs a resolvable API key, and its name must not be the
-            # reserved "default" identity (loudly skipped when it is).
+            # nil: the always-present synthetic instances.default template is
+            # loudly skipped while unmodified, and every other entry needs a
+            # resolvable API key.
             def claimable_instance_config(name:, config:)
+              if unconfigured_default?(name: name, config: config)
+                warn_unconfigured_default
+                return
+              end
+
               normalized = normalize_instance_config(config: config)
 
               return unless resolvable_api_key?(normalized[:gemini_api_key])
 
-              if reserved_instance_name?(name)
-                warn_reserved_instance_name
-                return
-              end
-
               normalized
             end
 
-            # "default" is the reserved SSOT v3 instance identity: Identity::
-            # InstanceKey rejects it, so an entry literally named `default`
-            # (including the always-present synthetic provider_settings
-            # template) can never be published under name-based identity.
-            # The skip is unconditional, every tick.
-            def reserved_instance_name?(name)
-              name.to_s == 'default'
+            # The synthetic instances.default section — ProviderSettings.build
+            # always nests the extension's own instance defaults (endpoint,
+            # discovery_interval, the env://GEMINI_API_KEY placeholder
+            # credential, fleet/limits blocks) there. It is "configured" only
+            # when the operator changed the entry: while it is still the
+            # unmodified template (placeholder credential included) it is a
+            # phantom the provider layer must never claim. A 'default' entry
+            # the operator modified (a real API key, a different endpoint) is
+            # a plain instance label — v2 accepted 'default' as an ordinary
+            # name — and passes through to the claim path.
+            def unconfigured_default?(name:, config:)
+              name.to_s == 'default' && deep_symbolize(config) == synthetic_default_instance
+            end
+
+            # The nested template, straight from the extension's registered
+            # defaults — compared by value against the live template, never
+            # against a hardcoded literal.
+            def synthetic_default_instance
+              @synthetic_default_instance ||=
+                Legion::Extensions::Llm::Gemini.default_settings.dig(:instances, :default)
+            end
+
+            # Settings entries arrive with string or symbol keys (YAML vs
+            # JSON vs the nested template); canonicalize before comparing.
+            def deep_symbolize(value)
+              case value
+              when Hash
+                value.to_h { |key, inner| [key.respond_to?(:to_sym) ? key.to_sym : key, deep_symbolize(inner)] }
+              when Array
+                value.map { |inner| deep_symbolize(inner) }
+              else
+                value
+              end
             end
 
             # Warns once per actor lifetime so the skip is loud without
             # spamming every tick.
-            def warn_reserved_instance_name
-              return if @reserved_name_warned
+            def warn_unconfigured_default
+              return if @unconfigured_default_warned
 
-              @reserved_name_warned = true
+              @unconfigured_default_warned = true
               log.warn(
-                'gemini: instances.default is not claimable — "default" is a reserved ' \
-                'SSOT v3 instance identity (InstanceKey rejects it); rename the config ' \
-                'entry to publish it'
+                'gemini: instances.default is not claimable — it is still the unmodified ' \
+                'synthetic provider template (placeholder API key); set a real API key on ' \
+                'the entry to publish it as an instance named "default"'
               )
             end
 
