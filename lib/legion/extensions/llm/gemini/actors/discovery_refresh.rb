@@ -248,7 +248,7 @@ module Legion
               cfg_instances = settings[:instances]
               if cfg_instances.is_a?(Hash)
                 cfg_instances.each do |name, config|
-                  normalized = claimable_instance_config(name: name, config: config)
+                  normalized = claimable_instance_config(config: config)
                   instances[name.to_sym] = normalized if normalized
                 end
               end
@@ -263,12 +263,7 @@ module Legion
             # nil: the always-present synthetic instances.default template is
             # loudly skipped while unmodified, and every other entry needs a
             # resolvable API key.
-            def claimable_instance_config(name:, config:)
-              if unconfigured_default?(name: name, config: config)
-                warn_unconfigured_default
-                return
-              end
-
+            def claimable_instance_config(config:)
               normalized = normalize_instance_config(config: config)
 
               return unless resolvable_api_key?(normalized[:gemini_api_key])
@@ -309,19 +304,6 @@ module Legion
               else
                 value
               end
-            end
-
-            # Warns once per actor lifetime so the skip is loud without
-            # spamming every tick.
-            def warn_unconfigured_default
-              return if @unconfigured_default_warned
-
-              @unconfigured_default_warned = true
-              log.warn(
-                'gemini: instances.default is not claimable — it is still the unmodified ' \
-                'synthetic provider template (placeholder API key); set a real API key on ' \
-                'the entry to publish it as an instance named "default"'
-              )
             end
 
             def build_auto_instance

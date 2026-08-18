@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.4] - 2026-08-18
+
+### Fixed
+- Remove synthetic-default discovery filtering and its once-per-boot warning; configured discovery now passes every instance entry through the normal claimability checks.
+
 ## [0.4.3] - 2026-08-17
 
 ### Changed

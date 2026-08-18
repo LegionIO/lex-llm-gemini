@@ -139,28 +139,11 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
       expect(actor.send(:configured_instances)).to be_empty
     end
 
-    it 'skips an unmodified synthetic "default" template even when its placeholder resolves' do
-      # The GEMINI_API_KEY env var IS set (around hook), so the template's
-      # env://GEMINI_API_KEY placeholder would resolve to a real key — the
-      # skip must key off the unmodified template shape, not the name.
+    it 'includes the default template when its placeholder resolves' do
       template = Legion::Extensions::Llm::Gemini.default_settings.dig(:instances, :default)
       allow(actor).to receive(:settings).and_return({ instances: { default: template } })
 
-      expect(actor.send(:configured_instances)).to be_empty
-    end
-
-    it 'warns exactly once per actor lifetime when the unmodified "default" template is skipped' do
-      template = Legion::Extensions::Llm::Gemini.default_settings.dig(:instances, :default)
-      warnings = []
-      fake_log = Object.new
-      fake_log.define_singleton_method(:warn) { |message = nil, **| warnings << message.to_s }
-      allow(actor).to receive_messages(log: fake_log, settings: { instances: { default: template } })
-
-      expect(actor.send(:configured_instances)).to be_empty
-      expect(actor.send(:configured_instances)).to be_empty
-
-      expect(warnings.size).to eq(1), 'the template skip must be loud but not per-tick spam'
-      expect(warnings.first).to include('"default"')
+      expect(actor.send(:configured_instances)).to have_key(:default)
     end
 
     it 'does not skip a configured "default" (real API key) — provider-layer claimable set' do
