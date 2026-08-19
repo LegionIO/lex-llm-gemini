@@ -47,6 +47,31 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(payload[:contents]).to eq([{ role: 'user', parts: [{ text: 'hello' }] }])
   end
 
+  it 'carries the folded system message through the actual callable into systemInstruction' do
+    captured_payload = nil
+    connection = instance_double(Legion::Extensions::Llm::Connection)
+    provider.instance_variable_set(:@connection, connection)
+    allow(connection).to receive(:post) do |_url, payload, &_block|
+      captured_payload = payload
+      fake_response(completion_response_body)
+    end
+    callable = described_class::Actor::GeminiCallable.new(
+      instance_cfg: { gemini_api_key: 'test-key' }, logger: instance_double(Logger).as_null_object,
+      provider: provider
+    )
+    messages = [
+      Legion::Extensions::Llm::Canonical::Message.build(role: :system, content: 'Follow the exact system law.'),
+      Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
+    ]
+
+    callable.chat(messages: messages, model: 'gemini-2.0-flash')
+
+    expect(captured_payload[:systemInstruction]).to eq(
+      parts: [{ text: 'Follow the exact system law.' }]
+    )
+    expect(captured_payload[:contents]).to eq([{ role: 'user', parts: [{ text: 'hello' }] }])
+  end
+
   it 'parses Gemini completion responses' do
     expect(completion_message.to_h).to include(role: :assistant, content: 'hi', model_id: 'gemini-2.0-flash')
     expect([completion_message.input_tokens, completion_message.output_tokens]).to eq([3, 4])

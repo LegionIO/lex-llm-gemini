@@ -6,6 +6,25 @@ module Legion
   module Extensions
     module Llm
       module Gemini
+        # Message-kind compatibility across legacy and Canonical message types.
+        module MessageKinds
+          private
+
+          def tool_call_message?(message)
+            return message.tool_call? if message.respond_to?(:tool_call?)
+
+            calls = message.tool_calls
+            !calls.nil? && !calls.empty?
+          end
+
+          def tool_result_message?(message)
+            return message.tool_result? if message.respond_to?(:tool_result?)
+
+            tool_call_id = message.tool_call_id
+            !tool_call_id.nil? && !tool_call_id.to_s.empty?
+          end
+        end
+
         # Message formatting helpers mixed into Provider.
         module MessageFormatter
           private
@@ -57,14 +76,14 @@ module Legion
 
           def gemini_role(message)
             return 'model' if message.role == :assistant
-            return 'function' if message.tool_result?
+            return 'function' if tool_result_message?(message)
 
             message.role.to_s
           end
 
           def message_parts(message)
-            return tool_call_parts(message) if message.tool_call?
-            return tool_result_parts(message) if message.tool_result?
+            return tool_call_parts(message) if tool_call_message?(message)
+            return tool_result_parts(message) if tool_result_message?(message)
 
             content_parts(message.content)
           end
@@ -327,6 +346,7 @@ module Legion
         # Gemini provider implementation for the Legion::Extensions::Llm base provider contract.
         class Provider < Legion::Extensions::Llm::Provider
           include Legion::Logging::Helper
+          include MessageKinds
           include MessageFormatter
           include ResponseParser
           include OfferingBuilder

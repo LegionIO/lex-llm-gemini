@@ -23,6 +23,7 @@ require 'legion/extensions/llm/inventory/identity'
 require 'legion/extensions/llm/inventory/records'
 require 'legion/extensions/llm/inventory/evidence'
 require 'legion/extensions/llm/inventory/probe_coordinator'
+require 'legion/extensions/llm/inventory/weight_reconciler'
 require 'legion/extensions/llm/routing/provider_outcome'
 require 'legion/extensions/llm/taxonomies'
 require 'legion/extensions/llm/capabilities'
@@ -212,9 +213,18 @@ module Legion
             def build_offering_draft(model_id:, model_data:, instance_cfg:, instance_key:)
               tier = instance_cfg[:tier] || :frontier
               generation_methods = extract_generation_methods(model_data: model_data)
+              weight_inputs = Legion::Extensions::Llm::Inventory::WeightSchema.weight_inputs(
+                settings: Legion::Settings,
+                instance_key: instance_key,
+                provider_native_key: model_id,
+                model: model_id,
+                tier: tier
+              )
 
               Legion::Extensions::Llm::Inventory::OfferingDraft.new(
                 provider_native_key: model_id, model: model_id, tier: tier,
+                weight_inputs: weight_inputs,
+                base_weight: Legion::Extensions::Llm::Inventory::WeightSchema.base_weight(weight_inputs),
                 operation_evidence: build_operation_evidence(generation_methods: generation_methods),
                 capability_evidence: build_capability_evidence(generation_methods: generation_methods),
                 context_evidence: build_context_evidence(model_data: model_data),
@@ -432,7 +442,7 @@ module Legion
             end
 
             def handle_reactive_probe(instance_id:, request:)
-              state = @instance_states[instance_id]
+              state = tracked_instance_state(instance_id)
               return unless state
 
               coordinator = state[:probe_coordinator]
@@ -537,52 +547,40 @@ module Legion
           # ── Instance lifecycle helpers ───────────────────────────────────────
           # ── Offering change comparison helpers ───────────────────────────────
           module OfferingComparison
+            SCALAR_EVIDENCE_FIELDS = %i[
+              context_evidence max_output_evidence embedding_dimensions_evidence
+              model_revision_evidence tokenizer_evidence
+            ].freeze
+
             private
 
-            # Compare on identity and evidence status, not Data#==: every draft
-            # embeds a fresh Time.now observed_at, so Data equality is false
-            # across ticks even when the model set and capabilities are
-            # unchanged (replace churn on every tick).
+            # Every catalog pass rebuilds evidence observation timestamps. The
+            # timestamps are telemetry, but every other draft field remains
+            # authoritative. Catalog order is not authoritative; multiplicity is.
             def offerings_changed?(previous:, current:)
-              current.map { |draft| offering_signature(draft) } !=
-                previous.map { |draft| offering_signature(draft) }
+              offering_comparison_multiset(current) != offering_comparison_multiset(previous)
             end
 
-            def offering_signature(draft)
-              [
-                draft.provider_native_key,
-                draft.model,
-                draft.tier,
-                operation_signature(draft),
-                capability_signature(draft),
-                value_signature(draft)
-              ]
+            def offering_comparison_multiset(offerings)
+              Array(offerings).map { |draft| offering_comparison_state(draft) }.tally
             end
 
-            def operation_signature(draft)
-              draft.operation_evidence.values.map do |evidence|
-                [evidence.operation, evidence.status, evidence.source]
-              end.sort
+            def offering_comparison_state(draft)
+              state = draft.to_h
+              state[:operation_evidence] = comparison_evidence_map(draft.operation_evidence)
+              state[:capability_evidence] = comparison_evidence_map(draft.capability_evidence)
+              SCALAR_EVIDENCE_FIELDS.each do |field|
+                state[field] = comparison_evidence(draft.public_send(field))
+              end
+              state
             end
 
-            def capability_signature(draft)
-              draft.capability_evidence.values.map do |evidence|
-                [evidence.capability, evidence.status, evidence.source]
-              end.sort
+            def comparison_evidence_map(evidence)
+              evidence.transform_values { |entry| comparison_evidence(entry) }
             end
 
-            def value_signature(draft)
-              [
-                value_pair(draft.context_evidence),
-                value_pair(draft.max_output_evidence),
-                value_pair(draft.embedding_dimensions_evidence),
-                value_pair(draft.model_revision_evidence),
-                value_pair(draft.tokenizer_evidence)
-              ]
-            end
-
-            def value_pair(evidence)
-              [evidence.status, evidence.value]
+            def comparison_evidence(evidence)
+              evidence.to_h.except(:observed_at)
             end
           end
 
@@ -696,9 +694,9 @@ module Legion
               instance_id  = name.to_s
               physical_id  = derive_physical_id(instance_cfg: instance_cfg)
               instance_key = build_instance_key(instance_id: instance_id, physical_id: physical_id)
+              offerings    = discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
               components   = build_instance_components(instance_id: instance_id, instance_cfg: instance_cfg,
                                                        instance_key: instance_key)
-              offerings    = discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
               state        = {
                 name: name,
                 instance_id: instance_id,
@@ -708,24 +706,101 @@ module Legion
                 probe_coordinator: components[:probe_coordinator],
                 publisher_token: components[:publisher_token],
                 sequence: 0,
-                offerings: offerings
+                offerings: offerings,
+                published: false
               }
+              Legion::Extensions::Llm::Inventory::WeightReconciler.track_initializing!(
+                states: @instance_states, state_key: instance_id, state: state, mutex: @instance_state_mutex
+              )
               settle_initial_readiness(instance_id: instance_id, state: state)
-              @instance_states[instance_id] = state
-              sync_display_health(state: state)
+              sync_display_health(state: state) if tracked_instance_state(instance_id).equal?(state)
             end
 
             def drop_instance(instance_id:, state:)
-              publisher.remove_instance(
-                instance_id: instance_id, publisher_token: state[:publisher_token],
-                physical_id: state[:instance_key].physical_id
-              )
+              removed = @instance_state_mutex.synchronize do
+                next false unless @instance_states[instance_id].equal?(state)
+
+                publisher.remove_instance(
+                  instance_id: instance_id, publisher_token: state[:publisher_token],
+                  physical_id: state[:instance_key].physical_id
+                )
+                @instance_states.delete(instance_id)
+                true
+              end
+              return false unless removed
+
               state[:callable]&.disconnect
               clear_display_health(name: state[:name])
-              @instance_states.delete(instance_id)
+              true
             rescue StandardError => e
               handle_exception(e, level: :warn, operation: 'gemini.actor.remove_instance',
                                   instance_id: instance_id)
+              false
+            end
+          end
+
+          # Shared weight-reconciliation bindings and synchronized state access.
+          module WeightPublication
+            private
+
+            def commit_discovered_offerings(instance_id:, state:, offerings:)
+              Legion::Extensions::Llm::Inventory::WeightReconciler.commit_if_changed!(
+                settings: Legion::Settings,
+                instance_id: instance_id,
+                state: state,
+                discovered_offerings: offerings,
+                mutex: @instance_state_mutex,
+                equivalent: lambda do |previous, current|
+                  !offerings_changed?(previous: previous, current: current)
+                end,
+                replace: method(:replace_weight_snapshot)
+              )
+            end
+
+            def replace_weight_snapshot(instance_id:, state:, offerings:, sequence:)
+              publisher.replace_instance_snapshot(
+                instance_id: instance_id,
+                publisher_token: state.fetch(:publisher_token),
+                offerings: offerings,
+                sequence: sequence,
+                physical_id: state.fetch(:instance_key).physical_id
+              )
+            end
+
+            def activate_weight_snapshot(instance_id:, state:, offerings:, sequence:, probe_token:)
+              publisher.activate_instance_snapshot(
+                instance_id: instance_id,
+                publisher_token: state.fetch(:publisher_token),
+                offerings: offerings,
+                sequence: sequence,
+                probe_token: probe_token,
+                physical_id: state.fetch(:instance_key).physical_id
+              )
+            end
+
+            def tracked_instance_state(instance_id)
+              return unless @instance_states && @instance_state_mutex
+
+              @instance_state_mutex.synchronize { @instance_states[instance_id] }
+            end
+
+            def instance_states_snapshot
+              @instance_state_mutex.synchronize { @instance_states.each_pair.to_h }
+            end
+
+            def observe_dormant_weights
+              Legion::Extensions::Llm::Inventory::WeightReconciler.observe_dormant!(
+                settings: Legion::Settings,
+                provider_family: :gemini,
+                states: @instance_states,
+                mutex: @instance_state_mutex,
+                tracker: @dormant_weight_tracker,
+                dormant_logger: lambda do |key|
+                  log.info do
+                    "[llm][gemini] action=dormant_weight weight_key=#{key.inspect} no_lane_published=true"
+                  end
+                end
+              )
             end
           end
 
@@ -738,6 +813,8 @@ module Legion
 
             def initial_discovery
               @instance_states = Concurrent::Map.new
+              @instance_state_mutex = Mutex.new
+              @dormant_weight_tracker = Legion::Extensions::Llm::Inventory::DormantWeightTracker.new
               reconcile_and_refresh
             end
 
@@ -750,10 +827,10 @@ module Legion
             # probe just ran; refresh and cadence probes start next tick.
             def reconcile_and_refresh
               configured = configured_instances
-              existing = @instance_states.keys
+              existing = instance_states_snapshot.keys
               add_newly_configured_instances(configured: configured)
               remove_unconfigured_instances(configured: configured)
-              @instance_states.each do |instance_id, state|
+              instance_states_snapshot.each do |instance_id, state|
                 next unless existing.include?(instance_id)
 
                 refresh_instance(instance_id: instance_id, state: state)
@@ -761,6 +838,7 @@ module Legion
                 handle_exception(e, level: :warn, operation: 'gemini.actor.refresh_instance',
                                     instance_id: instance_id)
               end
+              observe_dormant_weights
             end
 
             def add_newly_configured_instances(configured:)
@@ -769,7 +847,7 @@ module Legion
                 # id: two config names pointing at the same endpoint are
                 # distinct instances (the physical id never participates in
                 # identity).
-                next if @instance_states.key?(name.to_s)
+                next if tracked_instance_state(name.to_s)
 
                 claim_and_activate_instance(name: name, instance_cfg: instance_cfg)
               rescue StandardError => e
@@ -778,7 +856,7 @@ module Legion
             end
 
             def remove_unconfigured_instances(configured:)
-              @instance_states.each_value do |state|
+              instance_states_snapshot.each_value do |state|
                 next if configured.key?(state[:name])
 
                 drop_instance(instance_id: state[:instance_id], state: state)
@@ -796,9 +874,16 @@ module Legion
               )
               readiness = check_health(instance_cfg: state[:instance_cfg])
               if readiness.ready?
-                publisher.activate_instance_snapshot(
-                  instance_id: instance_id, publisher_token: state[:publisher_token],
-                  offerings: state[:offerings], sequence: 0, probe_token: probe_token, physical_id: physical_id
+                Legion::Extensions::Llm::Inventory::WeightReconciler.activate_tracked!(
+                  settings: Legion::Settings,
+                  instance_id: instance_id,
+                  state_key: instance_id,
+                  state: state,
+                  states: @instance_states,
+                  mutex: @instance_state_mutex,
+                  probe_token: probe_token,
+                  activate: method(:activate_weight_snapshot),
+                  activation_sequence: ->(tracked) { tracked.fetch(:sequence) }
                 )
               else
                 publisher.readiness_failed(
@@ -827,36 +912,34 @@ module Legion
             # path a transient outage at boot pins the instance for the process
             # lifetime. Re-probe each tick and activate once readiness passes.
             def retry_initial_activation(instance_id:, state:)
-              state[:offerings] = discover_offerings_for_instance(
+              offerings = discover_offerings_for_instance(
                 instance_cfg: state[:instance_cfg], instance_key: state[:instance_key]
               )
+              commit_discovered_offerings(instance_id: instance_id, state: state, offerings: offerings)
               settle_initial_readiness(instance_id: instance_id, state: state)
-              sync_display_health(state: state)
+              sync_display_health(state: state) if tracked_instance_state(instance_id).equal?(state)
             end
 
             def replace_offerings_if_changed(instance_id:, state:)
               new_offerings = discover_offerings_for_instance(
                 instance_cfg: state[:instance_cfg], instance_key: state[:instance_key]
               )
-              return unless offerings_changed?(previous: state[:offerings], current: new_offerings)
-
-              state[:sequence] += 1
-              publisher.replace_instance_snapshot(
-                instance_id: instance_id, publisher_token: state[:publisher_token],
-                offerings: new_offerings, sequence: state[:sequence],
-                physical_id: state[:instance_key].physical_id
+              changed = commit_discovered_offerings(
+                instance_id: instance_id, state: state, offerings: new_offerings
               )
-              state[:offerings] = new_offerings
-              sync_display_health(state: state)
+              sync_display_health(state: state) if changed
             end
 
             def remove_all_instances
               return unless @instance_states
 
-              @instance_states.each_value do |state|
+              instance_states_snapshot.each_value do |state|
                 drop_instance(instance_id: state[:instance_id], state: state)
               end
-              @instance_states.clear
+              @instance_state_mutex.synchronize do
+                @instance_states.clear
+                @dormant_weight_tracker.clear!
+              end
             end
           end
 
@@ -880,6 +963,7 @@ module Legion
             include OfferingComparison
             include DisplayHealth
             include InstanceComponents
+            include WeightPublication
             include InstanceLifecycle
 
             def runner_class    = self.class
