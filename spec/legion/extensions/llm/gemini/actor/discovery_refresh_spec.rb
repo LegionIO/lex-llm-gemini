@@ -110,6 +110,25 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
     actor.instance_variable_get(:@instance_states).fetch('primary')
   end
 
+  def authoritative_draft_pair(actor:, settings:)
+    config = normalized_primary(actor, settings)
+    original = build_offerings(actor, config).first
+    [original, yield(original)]
+  end
+
+  def publish_draft_pair(actor:, settings:, readiness:, drafts:)
+    publisher = actor.send(:publisher)
+    allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+    stub_draft_pair(actor: actor, settings: settings, readiness: readiness, drafts: drafts)
+    2.times { actor.manual }
+    publisher
+  end
+
+  def stub_draft_pair(actor:, settings:, readiness:, drafts:)
+    allow(actor).to receive_messages(settings: settings, check_health: readiness[:ready])
+    allow(actor).to receive(:discover_offerings_for_instance).and_return([drafts.first], [drafts.last])
+  end
+
   # ── D9: actor periodicity ───────────────────────────────────────────────────
 
   describe 'tick interval (time)' do
@@ -343,6 +362,98 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
       expect(registry.snapshot.publication_status(instance_key: key_for('primary')).published_sequence)
         .to eq(1)
       expect(registry.snapshot.offerings_for(instance_key: key_for('primary')).size).to eq(2)
+    end
+
+    it 'replaces once when authoritative quota domains change' do
+      drafts = authoritative_draft_pair(actor: actor, settings: settings) do |draft|
+        draft.with(quota_domains: { chat: 'requests-primary' })
+      end
+      publisher = publish_draft_pair(actor: actor, settings: settings, readiness: readiness, drafts: drafts)
+      key = key_for('primary', physical_id: physical_id_for(actor, settings[:instances][:primary]))
+      offering = registry.snapshot.offerings_for(instance_key: key).first
+
+      expect(publisher).to have_received(:replace_instance_snapshot).once
+      expect(registry.snapshot.publication_status(instance_key: key).published_sequence).to eq(1)
+      expect(offering.quota_domains).to eq(chat: 'requests-primary')
+    end
+
+    it 'replaces once when authoritative offering metadata changes' do
+      drafts = authoritative_draft_pair(actor: actor, settings: settings) do |draft|
+        draft.with(metadata: draft.metadata.merge(catalog_revision: 'revision-2'))
+      end
+      publisher = publish_draft_pair(actor: actor, settings: settings, readiness: readiness, drafts: drafts)
+      key = key_for('primary', physical_id: physical_id_for(actor, settings[:instances][:primary]))
+      offering = registry.snapshot.offerings_for(instance_key: key).first
+
+      expect(publisher).to have_received(:replace_instance_snapshot).once
+      expect(registry.snapshot.publication_status(instance_key: key).published_sequence).to eq(1)
+      expect(offering.metadata[:catalog_revision]).to eq('revision-2')
+    end
+
+    it 'replaces once when the publication source changes' do
+      drafts = authoritative_draft_pair(actor: actor, settings: settings) do |draft|
+        draft.with(publication_source: :provider_control_plane)
+      end
+      publisher = publish_draft_pair(actor: actor, settings: settings, readiness: readiness, drafts: drafts)
+      key = key_for('primary', physical_id: physical_id_for(actor, settings[:instances][:primary]))
+      offering = registry.snapshot.offerings_for(instance_key: key).first
+
+      expect(publisher).to have_received(:replace_instance_snapshot).once
+      expect(registry.snapshot.publication_status(instance_key: key).published_sequence).to eq(1)
+      expect(offering.publication_source).to eq(:provider_control_plane)
+    end
+
+    it 'replaces once when a scalar evidence source changes' do
+      drafts = authoritative_draft_pair(actor: actor, settings: settings) do |draft|
+        draft.with(context_evidence: draft.context_evidence.with(source: :model_metadata))
+      end
+      publisher = publish_draft_pair(actor: actor, settings: settings, readiness: readiness, drafts: drafts)
+      key = key_for('primary', physical_id: physical_id_for(actor, settings[:instances][:primary]))
+      offering = registry.snapshot.offerings_for(instance_key: key).first
+
+      expect(publisher).to have_received(:replace_instance_snapshot).once
+      expect(registry.snapshot.publication_status(instance_key: key).published_sequence).to eq(1)
+      expect(offering.context_evidence.source).to eq(:model_metadata)
+    end
+
+    it 'ignores equivalent catalog reordering without replacing or advancing the sequence' do
+      config = normalized_primary(actor, settings)
+      first = build_offerings(actor, config, model_ids: %w[gemini-2.0-flash gemini-2.5-pro])
+      second = build_offerings(actor, config, model_ids: %w[gemini-2.5-pro gemini-2.0-flash])
+      publisher = actor.send(:publisher)
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+      allow(actor).to receive_messages(settings: settings, check_health: readiness[:ready])
+      allow(actor).to receive(:discover_offerings_for_instance).and_return(first, second)
+
+      actor.manual
+      actor.manual
+
+      expect(publisher).not_to have_received(:replace_instance_snapshot)
+      expect(primary_state(actor)[:sequence]).to eq(0)
+      expect(registry.snapshot.publication_status(instance_key: key_for('primary')).published_sequence).to eq(0)
+    end
+
+    it 'keeps duplicate counts significant and cache atomic when Registry rejects them' do
+      config = normalized_primary(actor, settings)
+      draft = build_offerings(actor, config).first
+      publisher = actor.send(:publisher)
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+      allow(actor).to receive_messages(settings: settings, check_health: readiness[:ready])
+      allow(actor).to receive(:discover_offerings_for_instance).and_return([draft], [draft, draft])
+
+      actor.manual
+      state = primary_state(actor)
+      original = state[:offerings]
+      snapshot = registry.snapshot
+      published = snapshot.offerings_for(instance_key: key_for('primary'))
+      generation = snapshot.generation
+      actor.manual
+
+      expect(publisher).to have_received(:replace_instance_snapshot).once
+      expect(state.values_at(:sequence, :offerings)).to eq([0, original])
+      expect(registry.snapshot.offerings_for(instance_key: key_for('primary'))).to eq(published)
+      expect(registry.snapshot.generation).to eq(generation)
+      expect(registry.snapshot.publication_status(instance_key: key_for('primary')).published_sequence).to eq(0)
     end
   end
 

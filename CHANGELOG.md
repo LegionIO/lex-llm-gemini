@@ -10,6 +10,7 @@
 - Report configured-but-unpublished Gemini weight keys once per dormant cycle without adding a settings callback or operator workflow.
 - Render canonical system messages through the actual Gemini callable path as native `systemInstruction` payloads.
 - Validate weighted offering drafts before constructing or claiming a callable scope, so malformed weights leave no orphaned Registry publication and a later corrected ordinary pass activates without restart or operator cleanup.
+- Compare rebuilt catalogs as duplicate-preserving multisets of complete offering contracts, ignoring only evidence observation timestamps so catalog reordering cannot churn snapshots and authoritative metadata, quota, publication-source, or evidence-source changes cannot be missed.
 
 ### Dependencies
 - Raise the `lex-llm` floor from `>= 0.7.1` to `>= 0.7.6`; the `legion-settings` floor remains unchanged.

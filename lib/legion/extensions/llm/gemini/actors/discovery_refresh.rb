@@ -547,54 +547,40 @@ module Legion
           # ── Instance lifecycle helpers ───────────────────────────────────────
           # ── Offering change comparison helpers ───────────────────────────────
           module OfferingComparison
+            SCALAR_EVIDENCE_FIELDS = %i[
+              context_evidence max_output_evidence embedding_dimensions_evidence
+              model_revision_evidence tokenizer_evidence
+            ].freeze
+
             private
 
-            # Compare on identity and evidence status, not Data#==: every draft
-            # embeds a fresh Time.now observed_at, so Data equality is false
-            # across ticks even when the model set and capabilities are
-            # unchanged (replace churn on every tick).
+            # Every catalog pass rebuilds evidence observation timestamps. The
+            # timestamps are telemetry, but every other draft field remains
+            # authoritative. Catalog order is not authoritative; multiplicity is.
             def offerings_changed?(previous:, current:)
-              current.map { |draft| offering_signature(draft) } !=
-                previous.map { |draft| offering_signature(draft) }
+              offering_comparison_multiset(current) != offering_comparison_multiset(previous)
             end
 
-            def offering_signature(draft)
-              [
-                draft.provider_native_key,
-                draft.model,
-                draft.tier,
-                draft.weight_inputs,
-                draft.base_weight,
-                operation_signature(draft),
-                capability_signature(draft),
-                value_signature(draft)
-              ]
+            def offering_comparison_multiset(offerings)
+              Array(offerings).map { |draft| offering_comparison_state(draft) }.tally
             end
 
-            def operation_signature(draft)
-              draft.operation_evidence.values.map do |evidence|
-                [evidence.operation, evidence.status, evidence.source]
-              end.sort
+            def offering_comparison_state(draft)
+              state = draft.to_h
+              state[:operation_evidence] = comparison_evidence_map(draft.operation_evidence)
+              state[:capability_evidence] = comparison_evidence_map(draft.capability_evidence)
+              SCALAR_EVIDENCE_FIELDS.each do |field|
+                state[field] = comparison_evidence(draft.public_send(field))
+              end
+              state
             end
 
-            def capability_signature(draft)
-              draft.capability_evidence.values.map do |evidence|
-                [evidence.capability, evidence.status, evidence.source]
-              end.sort
+            def comparison_evidence_map(evidence)
+              evidence.transform_values { |entry| comparison_evidence(entry) }
             end
 
-            def value_signature(draft)
-              [
-                value_pair(draft.context_evidence),
-                value_pair(draft.max_output_evidence),
-                value_pair(draft.embedding_dimensions_evidence),
-                value_pair(draft.model_revision_evidence),
-                value_pair(draft.tokenizer_evidence)
-              ]
-            end
-
-            def value_pair(evidence)
-              [evidence.status, evidence.value]
+            def comparison_evidence(evidence)
+              evidence.to_h.except(:observed_at)
             end
           end
 
