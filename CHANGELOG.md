@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.6] - 2026-08-19
+
+### Changed
+- Enforce the canonical dispatch boundary end to end (N x N law): the fleet callable's chat, stream_chat, and count_tokens operations call `Provider#enforce_canonical_messages!` before delegating, and the provider render seam accepts only `Canonical::Message` (pipeline dispatch) or the provider-native `Message` (Chat facade) — anything else raises a loud `ArgumentError` instead of being tolerated. The 2026-08-19 incident was this defect class: hash messages crossed the dispatch boundary and provider-side leniency silently re-canonicalized them, masking the bypass for 25 failed openai dispatches. The duck-typed `respond_to?` message-kind fallbacks are removed with it.
+- Raise the `lex-llm` floor from `>= 0.7.6` to `>= 0.7.7` for `Provider#enforce_canonical_messages!` and the fleet worker's canonical wire rehydration.
+- Add a local-tree `lex-llm` path dependency to the test group so the adjacent checkout resolves against unreleased 0.7.7 during development.
+
+### Added
+- Cover the canonical boundary in the SSOT v3 conformance spec: plain-Hash input raises at both the callable and the render seam, canonical messages pass through the callable untranslated, and canonical inputs render to the identical Gemini wire payload — client request and provider wire formats are unchanged.
+
 ## [0.4.5] - 2026-08-19
 
 ### Changed

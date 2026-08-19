@@ -1041,10 +1041,15 @@ module Legion
             # (MessageFormatter#render_payload), so a raw string must be
             # wrapped before delegation; Model::Info instances pass through.
             def chat(messages:, model:, **rest)
+              # Canonical boundary (N x N law): pipeline dispatch delivers
+              # Canonical::Message objects only. Hash/legacy shapes are the
+              # bypass class — reject loudly, never coerce.
+              provider.enforce_canonical_messages!(messages)
               provider.chat(messages: messages, model: llm_model(model), **rest)
             end
 
             def stream_chat(messages:, model:, **rest, &)
+              provider.enforce_canonical_messages!(messages)
               provider.stream_chat(messages: messages, model: llm_model(model), **rest, &)
             end
 
@@ -1053,6 +1058,7 @@ module Legion
             end
 
             def count_tokens(messages:, model:, **rest)
+              provider.enforce_canonical_messages!(messages)
               provider.count_tokens(messages: messages, model: llm_model(model), **rest)
             end
 

@@ -56,6 +56,13 @@ class RecordingGeminiProvider
     { token_count: 42, model: model }
   end
 
+  # The production callable calls this on its provider before delegating (the
+  # canonical boundary). Delegate to the real base implementation — stateless
+  # over messages — so the double cannot drift from the production contract.
+  def enforce_canonical_messages!(messages)
+    Legion::Extensions::Llm::Provider.allocate.enforce_canonical_messages!(messages)
+  end
+
   def disconnect
     @disconnected = true
   end
@@ -718,13 +725,16 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
         provider: provider
       )
 
-      result = wrapped.chat(messages: [{ role: 'user', parts: [{ text: 'hi' }] }],
-                            model: 'gemini-2.0-flash', temperature: 0.5)
+      messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
+
+      result = wrapped.chat(messages: messages, model: 'gemini-2.0-flash', temperature: 0.5)
 
       expect(result).to include(role: 'assistant')
       call = provider.calls.first
       expect(call[:operation]).to eq(:chat)
-      expect(call[:messages]).to eq([{ role: 'user', parts: [{ text: 'hi' }] }])
+      # N x N law: the callable passes canonical messages through untranslated
+      # — the provider render seam is the only canonical <-> wire converter.
+      expect(call[:messages]).to eq(messages)
       expect(call[:temperature]).to eq(0.5)
       # D15: the fleet passes model as a RAW STRING, but Gemini's render path
       # calls model.id — the callable must hand the provider a Model::Info.
@@ -755,7 +765,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       )
 
       wrapped.embed(text: 'hello', model: 'gemini-embedding-001', dimensions: 768)
-      wrapped.count_tokens(messages: [{ role: 'user', content: 'hi' }], model: 'gemini-2.0-flash')
+      count_messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
+      wrapped.count_tokens(messages: count_messages, model: 'gemini-2.0-flash')
 
       expect(provider.calls.map { |c| c[:operation] }).to eq(%i[embed count_tokens])
       expect(provider.calls[0]).to include(text: 'hello', dimensions: 768)
@@ -776,6 +787,10 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
     it 'lets dispatch errors propagate unrescued (Faraday errors escape chat)' do
       provider = Class.new do
+        def enforce_canonical_messages!(messages)
+          Legion::Extensions::Llm::Provider.allocate.enforce_canonical_messages!(messages)
+        end
+
         def chat(**)
           raise Faraday::ServerError.new('503', Faraday::Env.new.tap { |e| e.status = 503 })
         end
@@ -794,6 +809,50 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
       expect(outcome.kind).to be_a(Symbol)
       expect(outcome.reason).to be_a(String)
+    end
+  end
+
+  # ─── Dispatch boundary regression guards (2026-08-19) ─────────────────────
+  # The 2026-08-19 defect class: plain-Hash messages crossed the dispatch
+  # boundary and lenient provider-side handling re-canonicalized them, masking
+  # the bypass (25/25 failed openai dispatches). N x N law: the callable is the
+  # canonical boundary and the provider render seam accepts only object shapes
+  # (Canonical::Message for pipeline dispatch, provider-native Message for the
+  # Chat facade). Both now reject plain-Hash input loudly, never silently.
+  describe 'dispatch boundary (canonical only)' do
+    let(:callable) { ssot_harness.build_callable(instance_config: ssot_harness.instance_configs.first) }
+    let(:provider) { described_class::Provider.new(gemini_api_key: 'test-key') }
+
+    let(:hash_request) do
+      [
+        { role: 'user', content: 'What is the capital of France?' },
+        { role: 'assistant', content: 'Paris.' }
+      ]
+    end
+
+    it 'rejects plain Hash messages at the callable instead of delegating them' do
+      expect { callable.chat(messages: hash_request, model: 'gemini-2.0-flash') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+      expect { callable.stream_chat(messages: hash_request, model: 'gemini-2.0-flash') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+      expect { callable.count_tokens(messages: hash_request, model: 'gemini-2.0-flash') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+    end
+
+    it 'rejects plain Hash messages at the render seam instead of rendering them' do
+      model = Legion::Extensions::Llm::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini)
+      expect do
+        provider.send(:render_payload, hash_request, tools: {}, temperature: 0.2, model: model, stream: false,
+                                                     schema: nil, thinking: nil, tool_prefs: nil)
+      end.to raise_error(ArgumentError, /Canonical::Message/)
+    end
+
+    it 'delegates canonical messages through the callable untouched' do
+      messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')]
+
+      callable.chat(messages: messages, model: 'gemini-2.0-flash')
+
+      expect(ssot_harness.inference_call_count(callable: callable)).to eq(1)
     end
   end
 

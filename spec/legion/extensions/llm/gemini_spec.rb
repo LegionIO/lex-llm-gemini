@@ -47,6 +47,18 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(payload[:contents]).to eq([{ role: 'user', parts: [{ text: 'hello' }] }])
   end
 
+  it 'renders canonical messages to the identical Gemini wire payload (wire format unchanged)' do
+    messages = [
+      Legion::Extensions::Llm::Canonical::Message.build(role: :system, content: 'Be terse.'),
+      Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
+    ]
+
+    payload = provider.send(:render_payload, messages, tools: {}, temperature: 0.2, model: flash_model, stream: false,
+                                                       schema: nil, thinking: nil, tool_prefs: nil)
+
+    expect(payload).to eq(chat_payload)
+  end
+
   it 'carries the folded system message through the actual callable into systemInstruction' do
     captured_payload = nil
     connection = instance_double(Legion::Extensions::Llm::Connection)

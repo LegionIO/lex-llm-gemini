@@ -6,20 +6,18 @@ module Legion
   module Extensions
     module Llm
       module Gemini
-        # Message-kind compatibility across legacy and Canonical message types.
+        # Message-kind predicates over the two boundary-accepted message shapes
+        # (Canonical::Message and provider-native Message). Both expose
+        # .tool_calls and .tool_call_id; the render seam rejects anything else.
         module MessageKinds
           private
 
           def tool_call_message?(message)
-            return message.tool_call? if message.respond_to?(:tool_call?)
-
             calls = message.tool_calls
             !calls.nil? && !calls.empty?
           end
 
           def tool_result_message?(message)
-            return message.tool_result? if message.respond_to?(:tool_result?)
-
             tool_call_id = message.tool_call_id
             !tool_call_id.nil? && !tool_call_id.to_s.empty?
           end
@@ -30,6 +28,8 @@ module Legion
           private
 
           def render_payload(messages, **opts)
+            # Canonical boundary (N x N law): reject non-object message shapes loudly.
+            enforce_message_boundary!(messages)
             model       = opts.fetch(:model)
             tools       = opts.fetch(:tools)
             temperature = opts.fetch(:temperature)
@@ -440,6 +440,24 @@ module Legion
             log.info { 'listing available Gemini models' }
             super.tap do |models|
               log.info { "discovered #{models.size} Gemini model(s)" }
+            end
+          end
+
+          private
+
+          # Canonical boundary: pipeline dispatch delivers Canonical::Message
+          # objects; the provider-native Chat facade delivers lex-llm Message.
+          # Both are object shapes this spoke renders to the Gemini wire. Plain
+          # Hashes are the bypass class (the 2026-08-19 incident) — reject
+          # loudly, never silently re-canonicalize.
+          def enforce_message_boundary!(messages)
+            messages.each do |message|
+              next if message.is_a?(Legion::Extensions::Llm::Canonical::Message)
+              next if message.is_a?(Legion::Extensions::Llm::Message)
+
+              raise ArgumentError,
+                    "gemini provider input must be Canonical::Message objects, got #{message.class} — " \
+                    'non-canonical message shapes must not cross the dispatch boundary'
             end
           end
         end
