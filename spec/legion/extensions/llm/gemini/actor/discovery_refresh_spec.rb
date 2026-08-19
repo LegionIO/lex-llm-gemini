@@ -4,7 +4,6 @@ require 'spec_helper'
 require 'legion/extensions/llm/inventory/registry'
 
 RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
-  let(:registry) { Legion::Extensions::Llm::Inventory::Registry }
   let(:gemini_key) { 'AIzaSySpecKey-Local' }
   let(:actor) { described_class.new }
   # The registered settings shape: a NAMED operator instance whose credential
@@ -35,6 +34,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
   end
 
   before { registry.reset! }
+  after { registry.reset! }
 
   around do |example|
     original = ENV.fetch('GEMINI_API_KEY', nil)
@@ -67,6 +67,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
     end
   end
 
+  def registry = Legion::Extensions::Llm::Inventory::Registry
+
   def normalized_primary(actor, settings)
     actor.send(:normalize_instance_config, config: settings[:instances][:primary])
   end
@@ -79,6 +81,33 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
 
   def physical_id_for(actor, config)
     actor.send(:derive_physical_id, instance_cfg: actor.send(:normalize_instance_config, config: config))
+  end
+
+  def full_weight_settings(provider: 100, instance: 100, model: 100, tier: 100)
+    {
+      extensions: {
+        llm: {
+          gemini: {
+            weight: provider,
+            instances: {
+              primary: {
+                weight: instance,
+                models: { 'gemini-2.0-flash' => { weight: model } }
+              }
+            }
+          }
+        }
+      },
+      llm: { routing: { tier_weights: { frontier: tier } } }
+    }
+  end
+
+  def stub_live_settings(live_settings)
+    allow(Legion::Settings).to receive(:dig) { |*path| live_settings.dig(*path) }
+  end
+
+  def primary_state(actor)
+    actor.instance_variable_get(:@instance_states).fetch('primary')
   end
 
   # ── D9: actor periodicity ───────────────────────────────────────────────────
@@ -314,6 +343,244 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
       expect(registry.snapshot.publication_status(instance_key: key_for('primary')).published_sequence)
         .to eq(1)
       expect(registry.snapshot.offerings_for(instance_key: key_for('primary')).size).to eq(2)
+    end
+  end
+
+  describe 'write-time weight publication on the ordinary actor cadence' do
+    let(:live_settings) { full_weight_settings(provider: 110, instance: 115, model: 120, tier: 150) }
+
+    before do
+      stub_live_settings(live_settings)
+      allow(actor).to receive_messages(settings: settings, check_health: readiness[:ready])
+      allow(actor).to receive(:discover_offerings_for_instance) do
+        build_offerings(actor, normalized_primary(actor, settings))
+      end
+    end
+
+    it 'stores the exact four-axis pair and product on drafts built by the production writer' do
+      draft = build_offerings(actor, normalized_primary(actor, settings)).first
+
+      expect(draft.weight_inputs).to eq(
+        tier: 150, provider: 110, instance: 115, model_or_offering: 120
+      )
+      expect(draft.base_weight).to eq(227_700_000)
+    end
+
+    it 'publishes one replacement for a weight-only change on the next ordinary pass' do
+      live_settings[:extensions][:llm][:gemini][:weight] = 100
+      actor.manual
+      live_settings[:extensions][:llm][:gemini][:weight] = 110
+
+      actor.manual
+
+      key = key_for('primary', physical_id: physical_id_for(actor, settings[:instances][:primary]))
+      status = registry.snapshot.publication_status(instance_key: key)
+      offering = registry.snapshot.offerings_for(instance_key: key).first
+      expect(status.published_sequence).to eq(1)
+      expect(offering.weight_inputs[:provider]).to eq(110)
+      expect(offering.base_weight).to eq(227_700_000)
+    end
+
+    it 'publishes nothing when settings change without changing the weight pair' do
+      actor.manual
+      live_settings[:extensions][:llm][:gemini][:unrelated] = 'changed'
+
+      actor.manual
+
+      expect(primary_state(actor)[:sequence]).to eq(0)
+    end
+
+    it 'preserves zero as a disable component and raises on false' do
+      live_settings[:extensions][:llm][:gemini][:weight] = 0
+      instance_cfg = normalized_primary(actor, settings)
+      expect(build_offerings(actor, instance_cfg).first.weight_inputs[:provider]).to eq(0)
+
+      live_settings[:extensions][:llm][:gemini][:weight] = false
+      expect { build_offerings(actor, instance_cfg) }.to raise_error(ArgumentError, /Integer >= 0/)
+    end
+
+    it 'logs each dormant weight once, clears on appearance, and logs on re-disappearance' do
+      messages = []
+      logger = instance_double(Logger).as_null_object
+      allow(logger).to receive(:info) do |message = nil, &block|
+        messages << (message || block.call)
+      end
+      allow(actor).to receive(:log).and_return(logger)
+      provider = live_settings[:extensions][:llm][:gemini]
+      provider[:instances][:ghost] = { weight: 125 }
+
+      actor.manual
+      actor.manual
+      provider[:instances].delete(:ghost)
+      actor.manual
+      provider[:instances][:ghost] = { weight: 125 }
+      actor.manual
+
+      expected = '[llm][gemini] action=dormant_weight weight_key=[:gemini, :instance, "ghost"] ' \
+                 'no_lane_published=true'
+      expect(messages.count(expected)).to eq(2)
+    end
+
+    it 'does not replace or advance sequence across ten unchanged ordinary passes' do
+      actor.manual
+      10.times { actor.manual }
+
+      expect(primary_state(actor)[:sequence]).to eq(0)
+    end
+
+    it 'does not couple actor cadence or shutdown to the Legion::Settings lifecycle' do
+      %i[on_reload reload! reset! off_reload].each do |method_name|
+        allow(Legion::Settings).to receive(method_name)
+      end
+
+      actor.manual
+      actor.shutdown
+
+      %i[on_reload reload! reset! off_reload].each do |method_name|
+        expect(Legion::Settings).not_to have_received(method_name)
+      end
+    end
+
+    it 'serializes interleaved ordinary passes with monotonic publications and matching final cache' do
+      actor.manual
+      published = []
+      publisher = actor.send(:publisher)
+      allow(publisher).to receive(:replace_instance_snapshot).and_wrap_original do |original, **kwargs|
+        published << kwargs
+        original.call(**kwargs)
+      end
+      allow(actor).to receive(:discover_offerings_for_instance) do
+        build_offerings(
+          actor, normalized_primary(actor, settings), model_ids: Thread.current[:gemini_models]
+        )
+      end
+      threads = [%w[gemini-2.5-pro], %w[gemini-2.5-flash]].map do |model_ids|
+        Thread.new do
+          Thread.current[:gemini_models] = model_ids
+          actor.send(:replace_offerings_if_changed, instance_id: 'primary', state: primary_state(actor))
+        end
+      end
+      threads.each(&:join)
+
+      expect(published.map { |entry| entry[:sequence] }).to eq([1, 2])
+      expect(published.map { |entry| entry[:offerings].first.model }.uniq.length).to eq(2)
+      expect(primary_state(actor)[:offerings]).to eq(published.last[:offerings])
+      expect(primary_state(actor)[:sequence]).to eq(2)
+    end
+
+    it 'leaves cache and sequence unchanged on replacement failure and retries on the next pass' do
+      actor.manual
+      state = primary_state(actor)
+      original_offerings = state[:offerings]
+      publisher = actor.send(:publisher)
+      allow(actor).to receive(:discover_offerings_for_instance)
+        .and_return(build_offerings(
+                      actor, normalized_primary(actor, settings), model_ids: %w[gemini-2.5-pro]
+                    ))
+      allow(publisher).to receive(:replace_instance_snapshot).and_raise(StandardError, 'publish failed')
+
+      expect do
+        actor.send(:replace_offerings_if_changed, instance_id: 'primary', state: state)
+      end.to raise_error(StandardError, 'publish failed')
+      expect(state[:sequence]).to eq(0)
+      expect(state[:offerings]).to equal(original_offerings)
+
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+      actor.send(:replace_offerings_if_changed, instance_id: 'primary', state: state)
+      expect(state[:sequence]).to eq(1)
+      expect(state[:offerings].first.model).to eq('gemini-2.5-pro')
+    end
+
+    it 'rebuilds from current settings after draft construction and before initial activation' do
+      live_settings[:extensions][:llm][:gemini][:weight] = 100
+      entered_readiness = Queue.new
+      resume_readiness = Queue.new
+      allow(actor).to receive(:check_health) do
+        entered_readiness << true
+        resume_readiness.pop
+        readiness[:ready]
+      end
+
+      worker = Thread.new { actor.manual }
+      entered_readiness.pop
+      live_settings[:extensions][:llm][:gemini][:weight] = 125
+      resume_readiness << true
+      worker.join
+
+      state = primary_state(actor)
+      expect(state[:published]).to be(true)
+      expect(state[:offerings].first.weight_inputs[:provider]).to eq(125)
+      key = key_for('primary', physical_id: physical_id_for(actor, settings[:instances][:primary]))
+      expect(registry.snapshot.offerings_for(instance_key: key).first.weight_inputs[:provider]).to eq(125)
+    end
+
+    it 'updates an unpublished cache without replacing or counting it as a dormant match' do
+      messages = []
+      logger = instance_double(Logger).as_null_object
+      allow(logger).to receive(:info) do |message = nil, &block|
+        messages << (message || block.call)
+      end
+      allow(actor).to receive_messages(log: logger, check_health: readiness[:unready])
+      publisher = actor.send(:publisher)
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+      allow(publisher).to receive(:activate_instance_snapshot).and_call_original
+      live_settings[:extensions][:llm][:gemini][:weight] = 100
+      actor.manual
+      live_settings[:extensions][:llm][:gemini][:weight] = 130
+
+      actor.manual
+
+      state = primary_state(actor)
+      expect(state[:published]).to be(false)
+      expect(state[:offerings].first.weight_inputs[:provider]).to eq(130)
+      expect(publisher).not_to have_received(:replace_instance_snapshot)
+      expect(publisher).not_to have_received(:activate_instance_snapshot)
+      expect(messages).to include(
+        '[llm][gemini] action=dormant_weight weight_key=[:gemini, :provider] no_lane_published=true'
+      )
+    end
+
+    it 'lets removal win a paused readiness race without late activation or display writes' do
+      entered_readiness = Queue.new
+      resume_readiness = Queue.new
+      allow(actor).to receive(:check_health) do
+        entered_readiness << true
+        resume_readiness.pop
+        readiness[:ready]
+      end
+      allow(actor).to receive(:sync_display_health).and_call_original
+      publisher = actor.send(:publisher)
+      allow(publisher).to receive(:activate_instance_snapshot).and_call_original
+
+      worker = Thread.new { actor.manual }
+      entered_readiness.pop
+      state = primary_state(actor)
+      actor.send(:drop_instance, instance_id: 'primary', state: state)
+      allow(actor).to receive(:settings).and_return({ instances: {} })
+      resume_readiness << true
+      worker.join
+
+      expect(publisher).not_to have_received(:activate_instance_snapshot)
+      expect(actor).not_to have_received(:sync_display_health)
+      expect(actor.instance_variable_get(:@instance_states).key?('primary')).to be(false)
+    end
+
+    it 'keeps activation state unpublished on publisher failure and permits a later retry' do
+      publisher = actor.send(:publisher)
+      allow(publisher).to receive(:activate_instance_snapshot).and_raise(StandardError, 'activation failed')
+
+      actor.manual
+
+      state = primary_state(actor)
+      expect(state[:published]).to be(false)
+      expect(state[:sequence]).to eq(0)
+      original_offerings = state[:offerings]
+
+      allow(publisher).to receive(:activate_instance_snapshot).and_call_original
+      actor.manual
+      expect(state[:published]).to be(true)
+      expect(state[:sequence]).to eq(0)
+      expect(state[:offerings]).not_to equal(original_offerings)
     end
   end
 

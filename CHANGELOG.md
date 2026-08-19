@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.5] - 2026-08-19
+
+### Changed
+- Publish the validated four-axis lane weight pair on every Gemini offering and reconcile weight-only changes atomically on the existing discovery cadence.
+- Track initializing instances before readiness, rebuild weights from current settings at activation, and serialize activation, replacement, removal, and cache mutation behind one writer mutex.
+
+### Fixed
+- Report configured-but-unpublished Gemini weight keys once per dormant cycle without adding a settings callback or operator workflow.
+- Render canonical system messages through the actual Gemini callable path as native `systemInstruction` payloads.
+
+### Dependencies
+- Raise the `lex-llm` floor from `>= 0.7.1` to `>= 0.7.6`; the `legion-settings` floor remains unchanged.
+
 ## [0.4.4] - 2026-08-18
 
 ### Fixed
