@@ -399,6 +399,32 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh do
       expect { build_offerings(actor, instance_cfg) }.to raise_error(ArgumentError, /Integer >= 0/)
     end
 
+    it 'leaves no claimed scope for malformed weights and cleanly retries after correction' do
+      publisher = actor.send(:publisher)
+      allow(publisher).to receive(:claim_instance).and_call_original
+      live_settings[:extensions][:llm][:gemini][:weight] = false
+
+      actor.manual
+
+      snapshot = registry.snapshot
+      expect(publisher).not_to have_received(:claim_instance)
+      expect(snapshot.each_publication_status.to_a).to be_empty
+      expect(snapshot.each_instance.to_a).to be_empty
+      expect(snapshot.each_offering.to_a).to be_empty
+      expect(actor.instance_variable_get(:@instance_states)).to be_empty
+
+      live_settings[:extensions][:llm][:gemini][:weight] = 110
+      actor.manual
+      actor.manual
+
+      key = key_for('primary', physical_id: physical_id_for(actor, settings[:instances][:primary]))
+      expect(publisher).to have_received(:claim_instance).once
+      expect(registry.snapshot.publication_status(instance_key: key).state).to eq(:complete)
+      expect(registry.snapshot.each_instance.to_a.size).to eq(1)
+      expect(registry.snapshot.offerings_for(instance_key: key).size).to eq(1)
+      expect(primary_state(actor)[:published]).to be(true)
+    end
+
     it 'logs each dormant weight once, clears on appearance, and logs on re-disappearance' do
       messages = []
       logger = instance_double(Logger).as_null_object
