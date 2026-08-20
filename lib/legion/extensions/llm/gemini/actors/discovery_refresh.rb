@@ -18,7 +18,6 @@ end
 
 require 'legion/extensions/llm/gemini/provider'
 require 'legion/extensions/llm/inventory/publisher'
-require 'legion/extensions/llm/inventory/scoped_refresher'
 require 'legion/extensions/llm/inventory/identity'
 require 'legion/extensions/llm/inventory/records'
 require 'legion/extensions/llm/inventory/evidence'
@@ -1004,12 +1003,7 @@ module Legion
             private
 
             def publisher
-              @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(
-                provider_family: :gemini,
-                compatibility_adapter: Legion::Extensions::Llm::Inventory::ScopedRefresher::LegacyCoordinatorAdapter.new(
-                  provider_family: :gemini
-                )
-              )
+              @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :gemini)
             end
           end
 
@@ -1040,17 +1034,19 @@ module Legion
             # offering's model id). Gemini's render path calls model.id
             # (MessageFormatter#render_payload), so a raw string must be
             # wrapped before delegation; Model::Info instances pass through.
-            def chat(messages:, model:, **rest)
+            # messages is positional — the 0.8.0 funnel and fleet WorkerExecution
+            # both hand the canonical Array<Canonical::Message> positionally.
+            def chat(messages, model:, **rest)
               # Canonical boundary (N x N law): pipeline dispatch delivers
               # Canonical::Message objects only. Hash/legacy shapes are the
               # bypass class — reject loudly, never coerce.
               provider.enforce_canonical_messages!(messages)
-              provider.chat(messages: messages, model: llm_model(model), **rest)
+              provider.chat(messages, model: llm_model(model), **rest)
             end
 
-            def stream_chat(messages:, model:, **rest, &)
+            def stream_chat(messages, model:, **rest, &)
               provider.enforce_canonical_messages!(messages)
-              provider.stream_chat(messages: messages, model: llm_model(model), **rest, &)
+              provider.stream_chat(messages, model: llm_model(model), **rest, &)
             end
 
             def embed(text:, model:, **rest)

@@ -36,12 +36,12 @@ class RecordingGeminiProvider
 
   def call_count = @calls.size
 
-  def chat(messages:, model:, **rest)
+  def chat(messages, model:, **rest)
     record(:chat, messages: messages, model: model, **rest)
     { role: 'assistant', content: 'test response', model: model }
   end
 
-  def stream_chat(messages:, model:, **rest, &)
+  def stream_chat(messages, model:, **rest, &)
     record(:stream_chat, messages: messages, model: model, **rest)
     { role: 'assistant', content: 'streamed response', model: model }
   end
@@ -727,7 +727,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
       messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
 
-      result = wrapped.chat(messages: messages, model: 'gemini-2.0-flash', temperature: 0.5)
+      params = Legion::Extensions::Llm::Canonical::Params.build(temperature: 0.5)
+      result = wrapped.chat(messages, model: 'gemini-2.0-flash', params: params)
 
       expect(result).to include(role: 'assistant')
       call = provider.calls.first
@@ -735,7 +736,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       # N x N law: the callable passes canonical messages through untranslated
       # — the provider render seam is the only canonical <-> wire converter.
       expect(call[:messages]).to eq(messages)
-      expect(call[:temperature]).to eq(0.5)
+      # 05 O4: temperature lives only in Canonical::Params (the kwarg is gone).
+      expect(call[:params].temperature).to eq(0.5)
       # D15: the fleet passes model as a RAW STRING, but Gemini's render path
       # calls model.id — the callable must hand the provider a Model::Info.
       expect(call[:model]).to be_a(Legion::Extensions::Llm::Model::Info)
@@ -751,7 +753,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       )
       info = Legion::Extensions::Llm::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini)
 
-      wrapped.chat(messages: [], model: info)
+      wrapped.chat([], model: info)
 
       expect(provider.calls.first[:model]).to equal(info)
     end
@@ -791,7 +793,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
           Legion::Extensions::Llm::Provider.allocate.enforce_canonical_messages!(messages)
         end
 
-        def chat(**)
+        def chat(_messages, **)
           raise Faraday::ServerError.new('503', Faraday::Env.new.tap { |e| e.status = 503 })
         end
       end.new
@@ -801,7 +803,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
         provider: provider
       )
 
-      expect { wrapped.chat(messages: [], model: 'gemini-2.0-flash') }.to raise_error(Faraday::ServerError)
+      expect { wrapped.chat([], model: 'gemini-2.0-flash') }.to raise_error(Faraday::ServerError)
     end
 
     it 'returns a ProviderOutcome from normalize_dispatch_error' do
@@ -816,9 +818,9 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   # The 2026-08-19 defect class: plain-Hash messages crossed the dispatch
   # boundary and lenient provider-side handling re-canonicalized them, masking
   # the bypass (25/25 failed openai dispatches). N x N law: the callable is the
-  # canonical boundary and the provider render seam accepts only object shapes
-  # (Canonical::Message for pipeline dispatch, provider-native Message for the
-  # Chat facade). Both now reject plain-Hash input loudly, never silently.
+  # canonical boundary and the base funnel enforces centrally before any
+  # rendering. Both reject plain-Hash input loudly, never silently; the render
+  # seam itself no longer re-implements the check (08 F2).
   describe 'dispatch boundary (canonical only)' do
     let(:callable) { ssot_harness.build_callable(instance_config: ssot_harness.instance_configs.first) }
     let(:provider) { described_class::Provider.new(gemini_api_key: 'test-key') }
@@ -831,29 +833,94 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     end
 
     it 'rejects plain Hash messages at the callable instead of delegating them' do
-      expect { callable.chat(messages: hash_request, model: 'gemini-2.0-flash') }
+      expect { callable.chat(hash_request, model: 'gemini-2.0-flash') }
         .to raise_error(ArgumentError, /Canonical::Message/)
-      expect { callable.stream_chat(messages: hash_request, model: 'gemini-2.0-flash') }
+      # rubocop:disable Lint/EmptyBlock -- the block never runs: enforcement raises first
+      expect { callable.stream_chat(hash_request, model: 'gemini-2.0-flash') { |_c| } }
         .to raise_error(ArgumentError, /Canonical::Message/)
+      # rubocop:enable Lint/EmptyBlock
       expect { callable.count_tokens(messages: hash_request, model: 'gemini-2.0-flash') }
         .to raise_error(ArgumentError, /Canonical::Message/)
     end
 
-    it 'rejects plain Hash messages at the render seam instead of rendering them' do
-      model = Legion::Extensions::Llm::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini)
-      expect do
-        provider.send(:render_payload, hash_request, tools: {}, temperature: 0.2, model: model, stream: false,
-                                                     schema: nil, thinking: nil, tool_prefs: nil)
-      end.to raise_error(ArgumentError, /Canonical::Message/)
+    it 'rejects plain Hash messages at the base funnel (central enforcement, 08 F2)' do
+      expect { provider.chat(hash_request, model: 'gemini-2.0-flash') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+      # rubocop:disable Lint/EmptyBlock -- the block never runs: enforcement raises first
+      expect { provider.stream_chat(hash_request, model: 'gemini-2.0-flash') { |_c| } }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+      # rubocop:enable Lint/EmptyBlock
+      expect { provider.count_tokens(messages: hash_request, model: 'gemini-2.0-flash') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
     end
 
     it 'delegates canonical messages through the callable untouched' do
       messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')]
 
-      callable.chat(messages: messages, model: 'gemini-2.0-flash')
+      callable.chat(messages, model: 'gemini-2.0-flash')
 
       expect(ssot_harness.inference_call_count(callable: callable)).to eq(1)
     end
+  end
+
+  # ─── Conformance kit: B1 central enforcement + B2 canonical outputs ───────
+  # The kit (09) runs against the REAL callable boundary: the production
+  # GeminiCallable over the production Gemini::Provider, with only the HTTP
+  # transport (Connection) stubbed. render_payload/parse_completion_response/
+  # build_chunk are the real Gemini wire code — no canonical-returning fake.
+  describe 'canonical boundary kit (09 B1/B2)' do
+    let(:provider) do
+      built = described_class::Provider.new(gemini_api_key: 'test-key')
+      connection = instance_double(Legion::Extensions::Llm::Connection)
+      allow(connection).to receive(:post) do |url, _payload, &block|
+        stub_provider_post(url, block)
+      end
+      built.instance_variable_set(:@connection, connection)
+      built
+    end
+    let(:callable) do
+      described_class::Actor::GeminiCallable.new(
+        instance_cfg: { gemini_api_key: 'test-key' },
+        logger: Logger.new(File::NULL),
+        provider: provider
+      )
+    end
+
+    # Both the sync and the stream post yield a request block, so the branch
+    # is the URL: streamGenerateContent feeds the SSE on_data callback, the
+    # completion URL just returns the canned sync body.
+    def stub_provider_post(url, block)
+      options = FakeStreamOptions.new
+      fake_request = Struct.new(:options).new(options)
+      block&.call(fake_request)
+      if url.to_s.include?('streamGenerateContent')
+        env = Struct.new(:status).new(200)
+        kit_stream_events.each { |event| options.on_data.call(event, 0, env) }
+      end
+      Struct.new(:body).new(kit_completion_body)
+    end
+
+    def kit_completion_body
+      {
+        'modelVersion' => 'gemini-2.0-flash',
+        'candidates' => [{ 'content' => { 'parts' => [{ 'text' => 'hi' }] }, 'finishReason' => 'STOP' }],
+        'usageMetadata' => { 'promptTokenCount' => 3, 'candidatesTokenCount' => 4 }
+      }
+    end
+
+    def kit_stream_events
+      [
+        { 'candidates' => [{ 'content' => { 'parts' => [{ 'text' => 'He' }] } }] },
+        { 'candidates' => [{ 'content' => { 'parts' => [{ 'text' => 'llo' }] } }] },
+        {
+          'candidates' => [{ 'content' => { 'parts' => [{ 'text' => '' }] }, 'finishReason' => 'STOP' }],
+          'usageMetadata' => { 'promptTokenCount' => 3, 'candidatesTokenCount' => 2 }
+        }
+      ].map { |body| "data: #{Legion::JSON.dump(body)}\n\n" }
+    end
+
+    it_behaves_like 'B1 — central canonical enforcement (08 F2)'
+    it_behaves_like 'B2 — canonical outputs (05 O5, 08 R2)'
   end
 
   # ─── No Legion::LLM reverse dependency ────────────────────────────────────
