@@ -1007,83 +1007,13 @@ module Legion
             end
           end
 
-          # Callable wrapper for a Gemini provider instance. Implements the
-          # fleet dispatch ops (chat/stream_chat/embed/count_tokens) by
-          # delegating to a per-instance Gemini::Provider, plus the
-          # disconnect and normalize_dispatch_error contracts required by
-          # Inventory::CallableHandle and Routing::ProviderOutcome. Dispatch
-          # errors propagate untouched so normalize_dispatch_error can
-          # classify them.
-          class GeminiCallable
-            def initialize(instance_cfg:, logger:, provider: nil)
-              @instance_cfg  = instance_cfg
-              @logger        = logger
-              @provider      = provider
-              @disconnected  = false
-            end
-
-            def disconnected? = @disconnected
-
-            def disconnect
-              @disconnected = true
-              @provider&.disconnect
-              @logger.debug { '[gemini][callable] disconnected' }
-            end
-
-            # Fleet and SelectionDispatch pass model as a RAW STRING (the
-            # offering's model id). Gemini's render path calls model.id
-            # (MessageFormatter#render_payload), so a raw string must be
-            # wrapped before delegation; Model::Info instances pass through.
-            # messages is positional — the 0.8.0 funnel and fleet WorkerExecution
-            # both hand the canonical Array<Canonical::Message> positionally.
-            def chat(messages, model:, **rest)
-              # Canonical boundary (N x N law): pipeline dispatch delivers
-              # Canonical::Message objects only. Hash/legacy shapes are the
-              # bypass class — reject loudly, never coerce.
-              provider.enforce_canonical_messages!(messages)
-              provider.chat(messages, model: llm_model(model), **rest)
-            end
-
-            def stream_chat(messages, model:, **rest, &)
-              provider.enforce_canonical_messages!(messages)
-              provider.stream_chat(messages, model: llm_model(model), **rest, &)
-            end
-
-            def embed(text:, model:, **rest)
-              provider.embed(text: text, model: llm_model(model), **rest)
-            end
-
-            def count_tokens(messages:, model:, **rest)
-              provider.enforce_canonical_messages!(messages)
-              provider.count_tokens(messages: messages, model: llm_model(model), **rest)
-            end
-
-            def normalize_dispatch_error(error:)
-              reason = error.message.to_s[0, 512]
-              Legion::Extensions::Llm::Routing::ProviderOutcome.new(
-                kind: classify_dispatch_error(error: error), reason: reason.empty? ? 'unknown dispatch error' : reason
-              )
-            end
-
+          # Dispatch-error classification for the Gemini callable (mixed into
+          # GeminiCallable). Pure functions of the error — no instance state.
+          # §8 health firewall: only the explicit Gemini UNAVAILABLE body maps
+          # to :instance_unavailable; status codes alone (503/529) are
+          # request-local overload conditions.
+          module DispatchErrorClassification
             private
-
-            def llm_model(model)
-              return model if model.respond_to?(:id)
-
-              Legion::Extensions::Llm::Model::Info.new(id: model.to_s, provider: :gemini)
-            end
-
-            def provider = @provider ||= build_provider
-
-            def build_provider
-              Legion::Extensions::Llm::Gemini::Provider.new(
-                {
-                  gemini_api_key: @instance_cfg[:gemini_api_key] || @instance_cfg[:api_key] ||
-                                  @instance_cfg.dig(:credentials, :api_key),
-                  gemini_api_base: @instance_cfg[:gemini_api_base] || @instance_cfg[:endpoint]
-                }.compact
-              )
-            end
 
             def classify_dispatch_error(error:)
               return :connection_failure if error.is_a?(Faraday::ConnectionFailed)
@@ -1099,9 +1029,6 @@ module Legion
                 error.is_a?(Legion::Extensions::Llm::Error)
             end
 
-            # §8 health firewall: only the explicit Gemini UNAVAILABLE body
-            # signal maps to :instance_unavailable. Status code alone (503/529)
-            # never does — those are request-local overload conditions.
             def classify_by_status(error:)
               return :instance_unavailable if explicit_service_unavailable?(error: error)
 
@@ -1161,6 +1088,116 @@ module Legion
 
               response = error.respond_to?(:response) ? error.response : nil
               response.respond_to?(:status) ? response.status : nil
+            end
+          end
+
+          # Callable wrapper for a Gemini provider instance. Implements the
+          # fleet dispatch ops (chat/stream_chat/embed/count_tokens) by
+          # delegating to a per-instance Gemini::Provider, plus the
+          # disconnect and normalize_dispatch_error contracts required by
+          # Inventory::CallableHandle and Routing::ProviderOutcome. Dispatch
+          # errors propagate untouched so normalize_dispatch_error can
+          # classify them.
+          class GeminiCallable
+            include DispatchErrorClassification
+
+            def initialize(instance_cfg:, logger:, provider: nil)
+              @instance_cfg  = instance_cfg
+              @logger        = logger
+              @provider      = provider
+              @disconnected  = false
+            end
+
+            def disconnected? = @disconnected
+
+            def disconnect
+              @disconnected = true
+              @provider&.disconnect
+              @logger.debug { '[gemini][callable] disconnected' }
+            end
+
+            # Named completion kwargs the base Provider funnel accepts
+            # directly (08 F3); everything else in the fleet's **rest is
+            # folded wire params that become a Canonical::Params at the
+            # boundary (05 O4 — temperature is a params member, never a kwarg).
+            COMPLETION_NAMED_KEYS = %i[tools schema thinking tool_prefs headers].freeze
+            EMBED_NAMED_KEYS = %i[dimensions headers].freeze
+
+            # Fleet and SelectionDispatch pass model as a RAW STRING (the
+            # offering's model id). Gemini's render path calls model.id
+            # (MessageFormatter#render_payload), so a raw string must be
+            # wrapped before delegation; Model::Info instances pass through.
+            # messages is positional — the 0.8.0 funnel and fleet WorkerExecution
+            # both hand the canonical Array<Canonical::Message> positionally.
+            def chat(messages, model:, **rest)
+              # Canonical boundary (N x N law): pipeline dispatch delivers
+              # Canonical::Message objects only. Hash/legacy shapes are the
+              # bypass class — reject loudly, never coerce.
+              provider.enforce_canonical_messages!(messages)
+              named, params = split_fleet_kwargs(rest, COMPLETION_NAMED_KEYS)
+              provider.chat(messages, model: llm_model(model), params: canonical_params(params), **named)
+            end
+
+            def stream_chat(messages, model:, **rest, &)
+              provider.enforce_canonical_messages!(messages)
+              named, params = split_fleet_kwargs(rest, COMPLETION_NAMED_KEYS)
+              provider.stream_chat(messages, model: llm_model(model), params: canonical_params(params), **named, &)
+            end
+
+            def embed(text:, model:, **rest)
+              named, params = split_fleet_kwargs(rest, EMBED_NAMED_KEYS)
+              provider.embed(text: text, model: llm_model(model), params: params, **named)
+            end
+
+            def count_tokens(messages:, model:, **rest)
+              provider.enforce_canonical_messages!(messages)
+              _named, params = split_fleet_kwargs(rest, [])
+              provider.count_tokens(messages: messages, model: llm_model(model), params: params)
+            end
+
+            def normalize_dispatch_error(error:)
+              reason = error.message.to_s[0, 512]
+              Legion::Extensions::Llm::Routing::ProviderOutcome.new(
+                kind: classify_dispatch_error(error: error), reason: reason.empty? ? 'unknown dispatch error' : reason
+              )
+            end
+
+            private
+
+            def llm_model(model)
+              return model if model.respond_to?(:id)
+
+              Legion::Extensions::Llm::Model::Info.new(id: model.to_s, provider: :gemini)
+            end
+
+            # The 0.8.0 completion funnel receives canonical values only
+            # (08 F3): the folded wire params become a Canonical::Params at
+            # the dispatch boundary — the renderer reads params.temperature /
+            # params.max_tokens, a raw Hash would NoMethodError.
+            def canonical_params(params)
+              Legion::Extensions::Llm::Canonical::Params.from_hash(params)
+            end
+
+            # Split the fleet's **rest into the base Provider's named kwargs
+            # and a payload params hash (any passed :params merged with the
+            # remaining unknown keys). Mirrors the shared callable boundary.
+            def split_fleet_kwargs(rest, named_keys)
+              named = rest.slice(*named_keys)
+              extra = rest.reject { |key, _| named.key?(key) }
+              params = (extra.delete(:params) || {}).to_h.merge(extra)
+              [named, params]
+            end
+
+            def provider = @provider ||= build_provider
+
+            def build_provider
+              Legion::Extensions::Llm::Gemini::Provider.new(
+                {
+                  gemini_api_key: @instance_cfg[:gemini_api_key] || @instance_cfg[:api_key] ||
+                                  @instance_cfg.dig(:credentials, :api_key),
+                  gemini_api_base: @instance_cfg[:gemini_api_base] || @instance_cfg[:endpoint]
+                }.compact
+              )
             end
           end
         end
