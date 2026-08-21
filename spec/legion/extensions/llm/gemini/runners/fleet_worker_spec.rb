@@ -18,10 +18,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Runners::FleetWorker do
   # that is splatted as kwargs into the runner function.
   let(:message) { envelope.merge(routing_key: 'llm.gemini.fleet_worker.#', message_id: 'msg-1') }
   let(:properties) { instance_double(FleetWorkerSpecProperties) }
-  let(:instances) { { local: { fleet: { respond_to_requests: true } } } }
 
   it 'delegates fleet execution to the shared lex-llm responder helper' do
-    allow(Legion::Extensions::Llm::Gemini).to receive(:discover_instances).and_return(instances)
     allow(Legion::Extensions::Llm::Fleet::ProviderResponder).to receive(:call).and_return(:ok)
 
     result = described_class.handle_fleet_request(**message, properties: properties)
@@ -30,15 +28,12 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Runners::FleetWorker do
     expect(Legion::Extensions::Llm::Fleet::ProviderResponder).to have_received(:call).with(
       payload: message.merge(properties: properties),
       provider_family: :gemini,
-      provider_class: Legion::Extensions::Llm::Gemini::Provider,
-      provider_instances: satisfy { |resolver| resolver.call == instances },
       delivery: nil,
       properties: properties
     )
   end
 
   it 'accepts a bare envelope hash with no transport metadata' do
-    allow(Legion::Extensions::Llm::Gemini).to receive(:discover_instances).and_return(instances)
     allow(Legion::Extensions::Llm::Fleet::ProviderResponder).to receive(:call).and_return(:ok)
 
     expect(described_class.handle_fleet_request(**envelope)).to eq(:ok)
