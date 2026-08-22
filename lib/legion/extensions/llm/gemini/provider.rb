@@ -297,41 +297,10 @@ module Legion
           end
         end
 
-        # Gemini operation parsers: provider-native model facts (Model::Info,
-        # D1) and the embed operation's documented artifact (05 §3, O07 —
-        # a Hash shape, not a canonical type).
+        # Gemini operation parsers: the embed operation's documented artifact
+        # (05 §3, O07 — a Hash shape, not a canonical type).
         module OperationParsers
           private
-
-          def parse_list_models_response(response, provider, capabilities)
-            Array(response.body['models']).map do |model_data|
-              model_id = model_data.fetch('name').delete_prefix('models/')
-              methods = Array(model_data['supportedGenerationMethods'])
-              input_mods, output_mods = modalities_for(methods)
-
-              Legion::Extensions::Llm::Model::Info.new(
-                id: model_id,
-                name: model_data['displayName'] || model_id,
-                provider: provider,
-                context_length: model_data['inputTokenLimit'],
-                capabilities: capabilities.critical_capabilities_for(model_data),
-                modalities_input: input_mods,
-                modalities_output: output_mods,
-                metadata: {
-                  max_output_tokens: model_data['outputTokenLimit'],
-                  version: model_data['version'],
-                  description: model_data['description'],
-                  supported_generation_methods: methods
-                }
-              )
-            end
-          end
-
-          def modalities_for(methods)
-            return [%w[text], %w[embeddings]] if methods.include?('embedContent')
-
-            [%w[text image audio video], %w[text]]
-          end
 
           def render_embedding_payload(text, model:, dimensions:)
             {
@@ -444,13 +413,6 @@ module Legion
 
           def embed_content_url(model:)
             "#{model_path(model)}:embedContent"
-          end
-
-          def list_models(**)
-            log.info { 'listing available Gemini models' }
-            super.tap do |models|
-              log.info { "discovered #{models.size} Gemini model(s)" }
-            end
           end
 
           # StopReasonMapping mixin override: the shared vocabulary covers the

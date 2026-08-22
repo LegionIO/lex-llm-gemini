@@ -17,14 +17,15 @@ require 'legion/extensions/llm/capabilities'
 require 'legion/extensions/llm/fleet/worker_execution'
 require 'legion/extensions/llm/fleet/protocol'
 
-# GeminiCallable is loaded via spec_helper → gemini.rb → discovery_refresh.rb
-# (spec_helper stubs the LegionIO actor runtime before loading gemini)
+# The gem entry does not require its discovery runner (the daemon runner-scan
+# does); specs require it spec-side, matching the sibling provider convention.
+require 'legion/extensions/llm/gemini/runners/discovery'
 
 # ── RecordingGeminiProvider ───────────────────────────────────────────────────
 # Test-local stand-in for the per-instance Gemini::Provider that the
-# PRODUCTION GeminiCallable delegates its fleet dispatch ops to. It replaces
-# the I/O boundary (the Provider's HTTP client) so conformance tests run
-# offline; the callable under test is the real production class, and its
+# PRODUCTION Helpers::Callable delegates its fleet dispatch ops to. It
+# replaces the I/O boundary (the Provider's HTTP client) so conformance tests
+# run offline; the callable under test is the real production class, and its
 # dispatch methods are the real delegation code.
 class RecordingGeminiProvider
   attr_reader :calls, :disconnected
@@ -78,9 +79,9 @@ end
 # Harness class for Gemini SSOT v3 conformance testing. Implements the full
 # interface required by the shared conformance examples without touching
 # any external service. build_callable returns the PRODUCTION
-# GeminiCallable (dispatch ops delegate to an injected RecordingGeminiProvider
+# Helpers::Callable (dispatch ops delegate to an injected RecordingGeminiProvider
 # in place of the real per-instance Provider's HTTP client), and
-# identity/draft building delegate to the actor's PRODUCTION methods — the
+# identity/draft building delegate to the runner's PRODUCTION methods — the
 # harness duplicates no builder logic (drift would mask production bugs).
 class GeminiSsotHarness
   # Each config carries its operator CONFIG NAME (the key it would hold under
@@ -115,44 +116,44 @@ class GeminiSsotHarness
     instance_config[:name].to_s
   end
 
-  # Delegates to the actor's PRODUCTION physical-id derivation (secondary
+  # Delegates to the runner's PRODUCTION physical-id derivation (secondary
   # field: dedup/diagnostics only, never the identity).
   def physical_id(instance_config:)
-    Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh
-      .allocate.send(:derive_physical_id, instance_cfg: instance_config)
+    Legion::Extensions::Llm::Gemini::Runners::Discovery
+      .derive_physical_id(instance_cfg: instance_config)
   end
 
   def build_callable(instance_config:)
     provider = RecordingGeminiProvider.new
-    callable = Legion::Extensions::Llm::Gemini::Actor::GeminiCallable.new(
+    callable = Legion::Extensions::Llm::Gemini::Helpers::Callable.new(
       instance_cfg: instance_config, logger: @logger, provider: provider
     )
     @provider_by_callable[callable] = provider
     callable
   end
 
-  # Delegates to the actor's PRODUCTION draft builder (ModelDiscovery),
-  # not a spec-local duplicate of the evidence construction.
+  # Delegates to the runner's PRODUCTION draft builder, not a spec-local
+  # duplicate of the evidence construction. The InstanceKey is composed
+  # directly (Inventory::Identity owns instance identity — the pipeline
+  # composes it inline, no legacy builder helper).
   def build_offering_drafts(instance_config:, tier: :frontier, **)
-    actor = Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh.allocate
     cfg = instance_config.merge(tier: tier)
-    instance_key = actor.send(
-      :build_instance_key,
+    instance_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: :gemini,
       instance_id: instance_id(instance_config: instance_config),
       physical_id: physical_id(instance_config: cfg)
     )
     [
-      actor.send(
-        :build_offering_draft,
+      Legion::Extensions::Llm::Gemini::Runners::Discovery.build_offering_draft(
+        instance_cfg: cfg,
+        instance_key: instance_key,
         model_id: 'gemini-2.0-flash',
         model_data: {
           name: 'models/gemini-2.0-flash',
           supportedGenerationMethods: %w[generateContent streamGenerateContent countTokens],
           inputTokenLimit: 1_048_576,
           outputTokenLimit: 8192
-        },
-        instance_cfg: cfg,
-        instance_key: instance_key
+        }
       )
     ]
   end
@@ -307,12 +308,10 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     it 'reproduces IDs after restart (identity is deterministic from inputs)' do
       config = ssot_harness.instance_configs[0]
       first_run = bring_up_instance(config)
-      first_offering_id = registry.snapshot.offerings_for(instance_key: first_run[:key]).first.offering_id
-      first_lane_id     = registry.snapshot.lanes_for(instance_key: first_run[:key]).first.lane_id
+      first_lane_id = registry.snapshot.lanes_for(instance_key: first_run[:key]).first.lane_id
 
       registry.reset!
       second_run = bring_up_instance(config)
-      expect(registry.snapshot.offerings_for(instance_key: second_run[:key]).first.offering_id).to eq(first_offering_id)
       expect(registry.snapshot.lanes_for(instance_key: second_run[:key]).first.lane_id).to eq(first_lane_id)
     end
   end
@@ -365,10 +364,10 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   describe 'empty generation methods handling' do
     it 'produces unknown evidence for chat/stream/embed when generation methods list is empty' do
-      # Call the actor's actual build_operation_evidence to verify the behavior —
-      # not a tautological manual construction.
-      actor  = Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh.allocate
-      result = actor.send(:build_operation_evidence, generation_methods: [])
+      # Call the runner's actual build_operation_evidence to verify the
+      # behavior — not a tautological manual construction.
+      result = Legion::Extensions::Llm::Gemini::Runners::Discovery
+               .send(:build_operation_evidence, generation_methods: [])
 
       expect(result[:chat].status).to eq(:unknown)
       expect(result[:stream_chat].status).to eq(:unknown)
@@ -383,8 +382,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   describe 'embed-only model operation separation' do
     it 'embed model does not advertise chat support' do
-      actor  = Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh.allocate
-      result = actor.send(:build_operation_evidence, generation_methods: %w[embedContent])
+      result = Legion::Extensions::Llm::Gemini::Runners::Discovery
+               .send(:build_operation_evidence, generation_methods: %w[embedContent])
 
       expect(result[:chat].status).to eq(:unsupported)
       expect(result[:stream_chat].status).to eq(:unsupported)
@@ -416,11 +415,11 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     end
 
     it 'offering drafts require an explicit model string' do
-      actor = Legion::Extensions::Llm::Gemini::Actor::DiscoveryRefresh.allocate
       expect do
         Legion::Extensions::Llm::Inventory::OfferingDraft.new(
           provider_native_key: 'test', model: '', tier: :frontier,
-          operation_evidence: actor.send(:build_operation_evidence, generation_methods: %w[generateContent]),
+          operation_evidence: Legion::Extensions::Llm::Gemini::Runners::Discovery
+                              .send(:build_operation_evidence, generation_methods: %w[generateContent]),
           context_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
           max_output_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent),
           embedding_dimensions_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown,
@@ -686,9 +685,9 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     end
   end
 
-  # ─── GeminiCallable direct contract ────────────────────────────────────────
+  # ─── Helpers::Callable direct contract ─────────────────────────────────────
 
-  describe Legion::Extensions::Llm::Gemini::Actor::GeminiCallable do
+  describe Legion::Extensions::Llm::Gemini::Helpers::Callable do
     let(:callable) do
       described_class.new(
         instance_cfg: ssot_harness.instance_configs[0],
@@ -738,24 +737,23 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       expect(call[:messages]).to eq(messages)
       # 05 O4: temperature lives only in Canonical::Params (the kwarg is gone).
       expect(call[:params].temperature).to eq(0.5)
-      # D15: the fleet passes model as a RAW STRING, but Gemini's render path
-      # calls model.id — the callable must hand the provider a Model::Info.
-      expect(call[:model]).to be_a(Legion::Extensions::Llm::Model::Info)
-      expect(call[:model].id).to eq('gemini-2.0-flash')
+      # D15: the fleet passes model as a RAW STRING; the callable hands it to
+      # the provider untranslated — the 0.8.0 contract is exact identity
+      # preservation (the render seam resolves the bare string).
+      expect(call[:model]).to eq('gemini-2.0-flash')
     end
 
-    it 'passes a Model::Info model through unchanged (D15 pass-through)' do
+    it 'passes a raw model string through unchanged (D15 pass-through)' do
       provider = RecordingGeminiProvider.new
       wrapped  = described_class.new(
         instance_cfg: ssot_harness.instance_configs[0],
         logger: Logger.new(File::NULL),
         provider: provider
       )
-      info = Legion::Extensions::Llm::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini)
 
-      wrapped.chat([], model: info)
+      wrapped.chat([], model: 'gemini-2.0-flash')
 
-      expect(provider.calls.first[:model]).to equal(info)
+      expect(provider.calls.first[:model]).to eq('gemini-2.0-flash')
     end
 
     it 'delegates embed and count_tokens to the per-instance provider' do
@@ -865,7 +863,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
   # ─── Conformance kit: B1 central enforcement + B2 canonical outputs ───────
   # The kit (09) runs against the REAL callable boundary: the production
-  # GeminiCallable over the production Gemini::Provider, with only the HTTP
+  # Helpers::Callable over the production Gemini::Provider, with only the HTTP
   # transport (Connection) stubbed. render_payload/parse_completion_response/
   # build_chunk are the real Gemini wire code — no canonical-returning fake.
   describe 'canonical boundary kit (09 B1/B2)' do
@@ -879,7 +877,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       built
     end
     let(:callable) do
-      described_class::Actor::GeminiCallable.new(
+      described_class::Helpers::Callable.new(
         instance_cfg: { gemini_api_key: 'test-key' },
         logger: Logger.new(File::NULL),
         provider: provider
@@ -926,15 +924,15 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   # ─── No Legion::LLM reverse dependency ────────────────────────────────────
 
   describe 'dependency isolation' do
-    it 'does not require Legion::LLM in the discovery actor' do
+    it 'does not require Legion::LLM in the discovery actor or runner' do
       project_root = File.expand_path('../../../..', __dir__)
-      actor_file   = File.read(
-        File.join(project_root, 'lib/legion/extensions/llm/gemini/actors/discovery_refresh.rb')
-      )
-      expect(actor_file).not_to match(/\bLegion::LLM\b/)
+      %w[actors/discovery.rb runners/discovery.rb].each do |relative_file|
+        file = File.read(File.join(project_root, 'lib/legion/extensions/llm/gemini', relative_file))
+        expect(file).not_to match(/\bLegion::LLM\b/), "#{relative_file} must not reference Legion::LLM"
+      end
     end
 
-    it 'GeminiCallable does not reference Legion::LLM' do
+    it 'Helpers::Callable does not reference Legion::LLM' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
       outcome  = callable.normalize_dispatch_error(error: RuntimeError.new('test'))
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)

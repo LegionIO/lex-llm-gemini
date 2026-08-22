@@ -10,9 +10,22 @@ FakeStreamOptions = Struct.new(:on_data) unless defined?(FakeStreamOptions)
 
 require 'legion/extensions/llm'
 
+require 'legion/settings'
+require 'legion/logging'
+
 # Stub the LegionIO host-runtime pieces that are not available in the provider
 # gem's spec environment before loading Gemini (the production host always
 # loads them; a missing runtime must fail loud at require time, not here).
+#
+# The Lex stand-in is functional, not empty: the shared Discovery::Pipeline
+# and the base Discovery::Actor `include` it, and the provider runner relies
+# on the real log/handle_exception/settings the host helper provides.
+# `handle_exception` (from Legion::Logging::Helper) logs and does not
+# re-raise; `settings` (from Legion::Settings::Helper) resolves the nested
+# extension path from the caller's namespace, so Gemini runners and actors
+# read/write the genuine Legion::Settings tree at
+# [:extensions][:llm][:gemini] — writable, which is how specs drive the
+# D14 health write-back and the publish-time weight settings.
 module Legion
   module Extensions
     module Actors
@@ -24,7 +37,18 @@ module Legion
     end
 
     module Helpers
-      module Lex; end unless const_defined?(:Lex, false)
+      unless const_defined?(:Lex, false)
+        module Lex
+          include Legion::Logging::Helper
+          include Legion::Settings::Helper
+
+          # Mirror the real Lex: module-level consumers (the Runners::*
+          # modules) get settings/log/handle_exception on the module itself.
+          def self.included(base)
+            base.extend(base) if base.instance_of?(Module) && !base.instance_of?(Class)
+          end
+        end
+      end
     end
 
     module Core; end unless const_defined?(:Core, false)
@@ -32,6 +56,15 @@ module Legion
 end
 
 require 'legion/extensions/llm/gemini'
+
+# Seed the gemini extension settings subtree so specs can drive the real
+# Legion::Settings tree (CredentialSources.setting, the pipeline's weight
+# reads, and the D14 display write-back all read this same live object).
+if defined?(Legion::Settings)
+  settings_root = Legion::Settings.loader.settings
+  settings_root[:extensions][:llm] ||= {}
+  settings_root[:extensions][:llm][:gemini] ||= {}
+end
 
 # Load the conformance kit shared example groups from the lex-llm gem's spec/
 # directory (spec/ ships in the gem but is NOT on the load path). Only the
