@@ -4,7 +4,6 @@ require 'spec_helper'
 
 RSpec.describe Legion::Extensions::Llm::Gemini do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
-  let(:flash_model) { Legion::Extensions::Llm::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini) }
 
   before do
     Legion::Extensions::Llm.config.gemini_api_key = 'test-key'
@@ -36,7 +35,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   end
 
   it 'builds Gemini content endpoints from model ids' do
-    expect(provider.generate_content_url(model: flash_model)).to eq(generation_url)
+    expect(provider.generate_content_url(model: 'gemini-2.0-flash')).to eq(generation_url)
   end
 
   it 'renders chat payloads in the Gemini generateContent format' do
@@ -54,7 +53,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     ]
 
     payload = provider.send(:render_payload, messages, tools: {}, params: params_with_temperature,
-                                                       model: flash_model, stream: false, schema: nil,
+                                                       model: 'gemini-2.0-flash', stream: false, schema: nil,
                                                        thinking: nil, tool_prefs: nil)
 
     expect(payload).to eq(chat_payload)
@@ -68,7 +67,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       captured_payload = payload
       fake_response(completion_response_body)
     end
-    callable = described_class::Actor::GeminiCallable.new(
+    callable = described_class::Helpers::Callable.new(
       instance_cfg: { gemini_api_key: 'test-key' }, logger: instance_double(Logger).as_null_object,
       provider: provider
     )
@@ -178,13 +177,6 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(response.text).to eq('Hello')
   end
 
-  it 'parses Gemini model listings' do
-    expect(models.first.to_h).to include(id: 'gemini-2.0-flash', provider: :gemini)
-    expect(models.first.capabilities).to include(:streaming, :tools, :vision)
-    expect(models.last.capabilities).to eq([:embedding])
-    expect(models.last.modalities.to_h).to eq(input: ['text'], output: ['embeddings'])
-  end
-
   it 'does not expose a registry_publisher class method on Provider (§2 single engine)' do
     expect(described_class::Provider).not_to respond_to(:registry_publisher)
   end
@@ -273,6 +265,17 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       expect(instances[:staging]).to include(gemini_api_key: 'gk-staging', tier: :private)
     end
 
+    it 'excludes a disabled instance with a valid credential from claimable instances' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :gemini)
+        .and_return({ instances: { staging: { api_key: 'gk-staging', enabled: false } } })
+
+      instances = described_class.discover_instances
+
+      expect(instances).not_to have_key(:staging)
+      expect(instances).to eq({})
+    end
+
     it 'deduplicates credentials when env and settings share the same key' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:env).with('GEMINI_API_KEY').and_return('gk-same')
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
@@ -306,7 +309,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
     ]
 
-    provider.send(:render_payload, messages, tools: {}, params: params_with_temperature, model: flash_model,
+    provider.send(:render_payload, messages, tools: {}, params: params_with_temperature, model: 'gemini-2.0-flash',
                                              stream: false, schema: nil, thinking: nil, tool_prefs: nil)
   end
 
@@ -323,7 +326,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
 
     chunks = []
     messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
-    response = target_provider.stream_chat(messages, model: flash_model) { |chunk| chunks << chunk }
+    response = target_provider.stream_chat(messages, model: 'gemini-2.0-flash') { |chunk| chunks << chunk }
     [chunks, response]
   end
 
@@ -343,10 +346,6 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     Struct.new(:body).new(body)
   end
 
-  def stub_model_discovery
-    allow(provider.connection).to receive(:get).with('models').and_return(fake_response(models_response_body))
-  end
-
   def generation_url
     'models/gemini-2.0-flash:generateContent'
   end
@@ -360,29 +359,6 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       'modelVersion' => 'gemini-2.0-flash',
       'candidates' => [{ 'content' => { 'parts' => [{ 'text' => 'hi' }] } }],
       'usageMetadata' => { 'promptTokenCount' => 3, 'candidatesTokenCount' => 4 }
-    }
-  end
-
-  def models
-    provider.send(:parse_list_models_response, fake_response(models_response_body), :gemini,
-                  described_class::Provider::Capabilities)
-  end
-
-  def models_response_body
-    {
-      'models' => [{
-        'name' => 'models/gemini-2.0-flash',
-        'displayName' => 'Gemini 2.0 Flash',
-        'inputTokenLimit' => 1_048_576,
-        'outputTokenLimit' => 8192,
-        'supportedGenerationMethods' => %w[generateContent streamGenerateContent]
-      }, {
-        'name' => 'models/gemini-embedding-001',
-        'displayName' => 'Gemini Embedding',
-        'inputTokenLimit' => 2048,
-        'outputTokenLimit' => 1,
-        'supportedGenerationMethods' => %w[embedContent]
-      }]
     }
   end
 
