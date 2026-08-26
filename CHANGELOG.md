@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.6] - 2026-08-20
+
+### Changed
+- **lex-llm 0.8.0 conformance (SSOT v4 contract cut):** the Gemini provider's parse/build paths migrate from the deleted legacy types to Canonical. `parse_completion_response` returns `Canonical::Response`, `build_chunk` yields `Canonical::Chunk` (text_delta / thinking_delta / tool_call_delta / usage), tool calls parse to `Array<Canonical::ToolCall>`, usage translates from `usageMetadata` to `Canonical::Usage`, and `finishReason` maps through the shared `StopReasonMapping` with the Gemini vocabulary additions (STOP, MAX_TOKENS, SAFETY, RECITATION, PROHIBITED_CONTENT, SPII, IMAGE_SAFETY). Wire-dialect tolerance (thought parts, thoughtSignature, JSON-object vs JSON-string tool arguments, Gemini finishReason spelling) lives only in the Gemini renderer/parser, per the 08 R1-R4 law.
+- The `embed` operation returns the documented artifact shape `{ text:, model:, embedding:, usage: Canonical::Usage }` (05 section 3 / O07) in place of the deleted `Llm::Embedding` type.
+- Rip the legacy `offering_from_model` -> `Routing::ModelOffering` production path from the provider: offering construction is the discovery writer's job (`OfferingDraft` + Registry publication, v3.1), and the base read path serves inventory offerings from the registry snapshot (07 C5).
+- Enforce the canonical dispatch boundary end to end (N x N law): the base funnel's central `enforce_canonical_messages!` covers chat/stream_chat, the fleet callable invokes the same shared helper at every operation entry, and the provider no longer re-implements the check (08 F2 / O05). Plain Hash/String/nil messages raise a typed `ArgumentError` at both entry forms. The callable's chat/stream_chat accept the canonical messages positionally, as the 0.8.0 funnel and fleet `WorkerExecution` hand them, and temperature travels only in `Canonical::Params` (05 O4).
+- Rip the `ScopedRefresher::LegacyCoordinatorAdapter` wiring from the discovery actor: the `Publisher` is built without a compatibility adapter and the deleted `scoped_refresher` require goes with it.
+- Raise the `lex-llm` floor from `>= 0.7.6` to `>= 0.8.0`.
+- Keep the local-tree `lex-llm` path dependency in the test group so the adjacent checkout resolves against the 0.8.x contract cut during development.
+
+### Added
+- Run the conformance kit B1 (central canonical enforcement) and B2 (canonical outputs, asserted by type) shared examples against the REAL callable boundary - the production `GeminiCallable` over the production `Gemini::Provider`, with only the HTTP transport stubbed.
+- Cover the canonical pipeline in the provider spec: `Canonical::Response` / `Canonical::Chunk` / `Canonical::ToolCall` / `Canonical::Thinking` / `Canonical::Usage` outputs asserted by type, a full streaming exchange driven through the real funnel ending in exactly one done chunk, and the Gemini wire format unchanged.
+
+### Removed
+- `provider_capability_policy_spec.rb` - it tested the deleted legacy offering production path; in 0.8.0 the SSOT data plane expresses capabilities as the writer's `capability_evidence`, and the capability-flag cascade has no provider home.
+
 ## [0.4.5] - 2026-08-19
 
 ### Changed

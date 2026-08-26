@@ -6,36 +6,40 @@ module Legion
   module Extensions
     module Llm
       module Gemini
-        # Message-kind compatibility across legacy and Canonical message types.
+        # Message-kind predicates over canonical messages. Canonical::Message
+        # exposes .tool_calls (Array<ToolCall> | nil) and .tool_call_id; the
+        # base funnel rejects anything that is not a Canonical::Message before
+        # rendering, so these see canonical values only.
         module MessageKinds
           private
 
           def tool_call_message?(message)
-            return message.tool_call? if message.respond_to?(:tool_call?)
-
             calls = message.tool_calls
             !calls.nil? && !calls.empty?
           end
 
           def tool_result_message?(message)
-            return message.tool_result? if message.respond_to?(:tool_result?)
-
             tool_call_id = message.tool_call_id
             !tool_call_id.nil? && !tool_call_id.to_s.empty?
           end
         end
 
-        # Message formatting helpers mixed into Provider.
+        # Gemini request renderer (08 R1/R4): renders the provider wire FROM
+        # canonical values. Every Gemini wire-dialect decision lives here —
+        # the base funnel enforces canonical input centrally before this runs.
         module MessageFormatter
           private
 
           def render_payload(messages, **opts)
-            model       = opts.fetch(:model)
-            tools       = opts.fetch(:tools)
-            temperature = opts.fetch(:temperature)
-            @model      = model.id
-            build_request_payload(messages: messages, tools: tools, temperature: temperature,
-                                  schema: opts[:schema], tool_prefs: opts[:tool_prefs])
+            model    = opts.fetch(:model)
+            tools    = opts.fetch(:tools)
+            params   = opts.fetch(:params)
+            @model   = model.respond_to?(:id) ? model.id : model.to_s
+            build_request_payload(
+              messages: messages, tools: tools,
+              temperature: maybe_normalize_temperature(params),
+              schema: opts[:schema], tool_prefs: opts[:tool_prefs]
+            )
           end
 
           def build_request_payload(messages:, tools:, temperature:, schema:, tool_prefs:)
@@ -88,39 +92,36 @@ module Legion
             content_parts(message.content)
           end
 
+          # Canonical content only: String | ContentBlock | Array<ContentBlock> | nil.
           def content_parts(content)
-            return Array(content.value) if content.is_a?(Legion::Extensions::Llm::Content::Raw)
-            return [{ text: Legion::JSON.generate(content) }] if content.is_a?(Hash) || content.is_a?(Array)
-            return [{ text: content.to_s }] unless content.is_a?(Legion::Extensions::Llm::Content)
+            return [] if content.nil?
+            return content.map { |block| content_block_part(block) } if content.is_a?(::Array)
+            return content_block_part(content) if content.is_a?(Legion::Extensions::Llm::Canonical::ContentBlock)
 
-            parts = []
-            parts << { text: content.text } if content.text
-            content.attachments.each { |attachment| parts << attachment_part(attachment) }
-            parts
+            [{ text: content.to_s }]
           end
 
-          def attachment_part(attachment)
-            if attachment.text?
-              { text: attachment.for_llm }
+          def content_block_part(block)
+            if block.text?
+              { text: block.text }
+            elsif block.type == :image
+              { inline_data: { mime_type: block.media_type, data: block.data } }
             else
-              { inline_data: { mime_type: attachment.mime_type, data: attachment.encoded } }
+              raise ArgumentError,
+                    "gemini renderer cannot render a :#{block.type} content block to the Gemini wire"
             end
           end
 
           def tool_call_parts(message)
-            calls = message.tool_calls.is_a?(Hash) ? message.tool_calls.values : Array(message.tool_calls)
-            calls.map do |tool_call|
+            message.tool_calls.map do |tool_call|
               { functionCall: { name: tool_call.name, args: tool_call.arguments } }
             end
           end
 
           def tool_result_parts(message)
-            [{
-              functionResponse: {
-                name: message.tool_call_id,
-                response: { name: message.tool_call_id, content: content_parts(message.content) }
-              }
-            }]
+            [{ functionResponse: { name: message.tool_call_id,
+                                   response: { name: message.tool_call_id,
+                                               content: content_parts(message.content) } } }]
           end
 
           def format_tools(tools)
@@ -149,41 +150,84 @@ module Legion
           end
         end
 
-        # Response parsing helpers mixed into Provider.
+        # Gemini response parser (08 R2/R4): parses the provider wire TO
+        # canonical types. Gemini wire-dialect translation (finishReason
+        # vocabulary, usageMetadata spellings, JSON-object vs JSON-string tool
+        # arguments, thought parts) lives here, at the edge.
         module ResponseParser
           private
 
+          # One response-parse boundary (08 R2): returns Canonical::Response.
           def parse_completion_response(response)
             body = response.body
             parts = response_parts(body)
 
-            Legion::Extensions::Llm::Message.new(
-              role: :assistant,
-              content: text_content(parts),
+            Canonical::Response.build(
+              text: text_content(parts),
+              thinking: thinking_from_parts(parts),
               tool_calls: parse_tool_calls(parts),
-              input_tokens: body.dig('usageMetadata', 'promptTokenCount'),
-              output_tokens: output_tokens(body),
-              cached_tokens: body.dig('usageMetadata', 'cachedContentTokenCount'),
-              thinking_tokens: body.dig('usageMetadata', 'thoughtsTokenCount'),
-              model_id: body['modelVersion'] || @model,
-              raw: body
+              usage: usage_from_metadata(body['usageMetadata']),
+              stop_reason: stop_reason_from_body(body),
+              model: body['modelVersion'] || @model
             )
           end
 
+          # One chunk-parse boundary (08 R2): returns a Canonical::Chunk or an
+          # Array of them (nil when the SSE body carried no content).
           def build_chunk(data)
             parts = response_parts(data)
+            stop_reason = stop_reason_from_body(data)
 
-            Legion::Extensions::Llm::Chunk.new(
-              role: :assistant,
-              content: text_content(parts),
-              tool_calls: parse_tool_calls(parts),
-              input_tokens: data.dig('usageMetadata', 'promptTokenCount'),
-              output_tokens: output_tokens(data),
-              cached_tokens: data.dig('usageMetadata', 'cachedContentTokenCount'),
-              thinking_tokens: data.dig('usageMetadata', 'thoughtsTokenCount'),
-              model_id: data['modelVersion'] || @model,
-              raw: data
-            )
+            chunks = streaming_chunks_for(parts, stop_reason: stop_reason)
+            chunks.concat(chunk_for_usage(usage_from_metadata(data['usageMetadata']), stop_reason))
+
+            return nil if chunks.empty?
+
+            chunks.size == 1 ? chunks.first : chunks
+          end
+
+          def streaming_chunks_for(parts, stop_reason:)
+            chunks = chunk_for_thinking(thinking_from_parts(parts), stop_reason)
+            chunks.concat(chunk_for_text(text_content(parts), stop_reason))
+            function_calls = parts.filter_map { |part| part['functionCall'] }.compact
+            chunks.concat(streaming_tool_call_chunks(function_calls, stop_reason: stop_reason))
+            chunks
+          end
+
+          # Gemini's final frame usually carries finishReason and
+          # usageMetadata together (often with no text part), so the
+          # usage chunk carries the frame's stop_reason — the
+          # usage_chunk factory has no slot for it.
+          def chunk_for_usage(usage, stop_reason)
+            return [] if usage.nil?
+
+            [Canonical::Chunk.build(type: :usage, usage: usage, request_id: nil, stop_reason: stop_reason)]
+          end
+
+          def chunk_for_thinking(thinking, stop_reason)
+            return [] unless thinking
+
+            [Canonical::Chunk.thinking_delta(delta: thinking.content.to_s, request_id: nil,
+                                             signature: thinking.signature, stop_reason: stop_reason)]
+          end
+
+          def chunk_for_text(text, stop_reason)
+            return [] if text.nil?
+
+            [Canonical::Chunk.text_delta(delta: text, request_id: nil, stop_reason: stop_reason)]
+          end
+
+          def streaming_tool_call_chunks(function_calls, stop_reason:)
+            function_calls.map do |function_call|
+              # Gemini streams a complete functionCall per chunk; the
+              # accumulator assembles arguments as JSON fragments, so the
+              # wire object is serialized to its JSON spelling here (10 U2).
+              fragment = { id: nil, name: function_call['name'],
+                           arguments: Legion::JSON.generate(function_call['args'] || {}), index: nil,
+                           signature: function_call['thoughtSignature'] }
+              Canonical::Chunk.build(type: :tool_call_delta, tool_call: fragment, request_id: nil,
+                                     stop_reason: stop_reason)
+            end
           end
 
           def response_parts(body)
@@ -195,52 +239,68 @@ module Legion
             text.empty? ? nil : text
           end
 
-          def output_tokens(body)
-            candidates = body.dig('usageMetadata', 'candidatesTokenCount') || 0
-            thoughts = body.dig('usageMetadata', 'thoughtsTokenCount') || 0
-            total = candidates + thoughts
+          # Gemini marks reasoning with the per-part `thought` flag; the
+          # thought signature rides on the part (commonly a functionCall).
+          def thinking_from_parts(parts)
+            thinking_text = parts.select { |part| part['thought'] }.filter_map { |part| part['text'] }.join
+            signature = parts.filter_map { |part| part['thoughtSignature'] }.first
+            return nil if thinking_text.empty? && signature.nil?
+
+            Canonical::Thinking.build(content: thinking_text, signature: signature)
+          end
+
+          def usage_from_metadata(usage_metadata)
+            return nil if usage_metadata.nil?
+
+            Canonical::Usage.build(
+              input_tokens: usage_metadata['promptTokenCount'],
+              output_tokens: output_tokens_from_metadata(usage_metadata),
+              cache_read_tokens: usage_metadata['cachedContentTokenCount'],
+              thinking_tokens: usage_metadata['thoughtsTokenCount']
+            )
+          end
+
+          # Gemini reports output as candidatesTokenCount + thoughtsTokenCount
+          # (thoughts are billed output); nil when the metadata reports none.
+          def output_tokens_from_metadata(usage_metadata)
+            total = (usage_metadata['candidatesTokenCount'] || 0) + (usage_metadata['thoughtsTokenCount'] || 0)
             total.positive? ? total : nil
           end
 
+          def stop_reason_from_body(body)
+            finish_reason = body.dig('candidates', 0, 'finishReason')
+            return nil if finish_reason.nil?
+
+            stop_reason_lookup(finish_reason)
+          end
+
+          # Sync tool calls → Array<ToolCall> (canonical; the legacy Hash-of-
+          # calls shape is gone). The ONE strict arguments parser (10 U2) runs
+          # on the JSON-string spelling; a wire object passes through as the
+          # canonical Hash.
           def parse_tool_calls(parts)
-            tool_calls = parts.each_with_object({}) do |part, result|
+            parts.filter_map do |part|
               function_call = part['functionCall']
-              next unless function_call
+              next if function_call.nil?
 
-              id = SecureRandom.uuid
-              result[id] = Legion::Extensions::Llm::ToolCall.new(
-                id: id,
-                name: function_call['name'],
-                arguments: function_call['args'] || {}
-              )
-            end
-
-            tool_calls.empty? ? nil : tool_calls
-          end
-
-          def parse_list_models_response(response, provider, capabilities)
-            Array(response.body['models']).map do |model_data|
-              model_id = model_data.fetch('name').delete_prefix('models/')
-              methods = Array(model_data['supportedGenerationMethods'])
-              input_mods, output_mods = modalities_for(methods)
-
-              Legion::Extensions::Llm::Model::Info.new(
-                id: model_id,
-                name: model_data['displayName'] || model_id,
-                provider: provider,
-                context_length: model_data['inputTokenLimit'],
-                capabilities: capabilities.critical_capabilities_for(model_data),
-                modalities_input: input_mods,
-                modalities_output: output_mods,
-                metadata: {
-                  max_output_tokens: model_data['outputTokenLimit'],
-                  version: model_data['version'],
-                  description: model_data['description'],
-                  supported_generation_methods: methods
-                }
-              )
+              Canonical::ToolCall.build(name: function_call['name'].to_s,
+                                        arguments: gemini_tool_arguments(function_call['args']),
+                                        metadata: { signature: function_call['thoughtSignature'] }.compact)
             end
           end
+
+          def gemini_tool_arguments(raw)
+            return {} if raw.nil?
+            return raw if raw.is_a?(::Hash)
+
+            Legion::Extensions::Llm::Responses::ToolArguments.parse!(raw)
+          end
+        end
+
+        # Gemini operation parsers: the embed operation's documented artifact
+        # (05 §3, O07 — a Hash shape, not a canonical type).
+        module OperationParsers
+          private
 
           def render_embedding_payload(text, model:, dimensions:)
             {
@@ -250,96 +310,15 @@ module Legion
             }.compact
           end
 
-          def parse_embedding_response(response, model:, **)
-            Legion::Extensions::Llm::Embedding.new(
-              vectors: response.body.dig('embedding', 'values'),
-              model: model,
-              input_tokens: response.body.dig('usageMetadata', 'promptTokenCount').to_i
-            )
-          end
-        end
-
-        # Offering and capability building helpers mixed into Provider.
-        module OfferingBuilder
-          private
-
-          def offering_from_model(model, health: {})
-            policy = Legion::Extensions::Llm::CapabilityPolicy.resolve(
-              real: real_capabilities_from(model),
-              provider_catalog: {},
-              probe: {},
-              provider_envelope: {},
-              provider_config: provider_capability_config,
-              instance_config: instance_capability_config,
-              model_config: model_capability_config(model.id)
-            )
-
-            build_model_offering(model, policy, health)
-          end
-
-          def build_model_offering(model, policy, health)
-            Routing::ModelOffering.new(
-              provider_family: slug.to_sym,
-              provider_instance: model.instance || provider_instance_id,
-              transport: offering_transport,
-              tier: offering_tier,
-              model: model.id,
-              canonical_model_alias: model.name,
-              model_family: model.family,
-              usage_type: offering_usage_type(model),
-              capabilities: policy[:capabilities],
-              capability_sources: policy[:sources],
-              limits: offering_limits(model),
-              health:,
-              metadata: offering_metadata(model)
-            )
-          end
-
-          def real_capabilities_from(model)
-            meta = model.respond_to?(:metadata) ? (model.metadata || {}) : {}
-            methods = Array(meta[:supported_generation_methods] || meta['supported_generation_methods'])
+          def parse_embedding_response(response, model:, text:)
             {
-              streaming: methods.include?('streamGenerateContent'),
-              embedding: methods.include?('embedContent'),
-              vision: Legion::Extensions::Llm::Gemini::Provider::Capabilities.vision?(
-                meta.merge('name' => "models/#{model.id}")
+              text: text,
+              model: model,
+              embedding: response.body.dig('embedding', 'values'),
+              usage: Canonical::Usage.build(
+                input_tokens: response.body.dig('usageMetadata', 'promptTokenCount')
               )
-            }.compact
-          end
-
-          def provider_capability_config
-            conf = Legion::Extensions::Llm::CredentialSources.setting(:extensions, :llm, :gemini)
-            conf.is_a?(Hash) ? conf.to_h.except(:instances, 'instances') : {}
-          rescue StandardError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'gemini.provider_capability_config')
-            {}
-          end
-
-          def instance_capability_config
-            config.to_h.slice(*Legion::Extensions::Llm::Provider::CAPABILITY_CONFIG_KEYS)
-          end
-
-          def model_capability_config(model_id)
-            hash = resolve_models_config
-            return {} unless hash.is_a?(Hash)
-
-            hash[model_id.to_s] || hash[model_id.to_sym] || {}
-          rescue StandardError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'gemini.model_capability_config')
-            {}
-          end
-
-          def resolve_models_config
-            config.to_h[:models]
-          rescue StandardError => e
-            handle_exception(e, level: :warn, handled: true, operation: 'gemini.resolve_models_config')
-            nil
-          end
-
-          def modalities_for(methods)
-            return [%w[text], %w[embeddings]] if methods.include?('embedContent')
-
-            [%w[text image audio video], %w[text]]
+            }
           end
         end
 
@@ -349,7 +328,7 @@ module Legion
           include MessageKinds
           include MessageFormatter
           include ResponseParser
-          include OfferingBuilder
+          include OperationParsers
 
           class << self
             def slug = 'gemini'
@@ -436,11 +415,19 @@ module Legion
             "#{model_path(model)}:embedContent"
           end
 
-          def list_models(**)
-            log.info { 'listing available Gemini models' }
-            super.tap do |models|
-              log.info { "discovered #{models.size} Gemini model(s)" }
-            end
+          # StopReasonMapping mixin override: the shared vocabulary covers the
+          # common spellings; these are the Gemini wire finishReason additions
+          # (R4: dialect at the parser edge).
+          def stop_reason_map_additions
+            {
+              'STOP' => :end_turn,
+              'MAX_TOKENS' => :max_tokens,
+              'SAFETY' => :content_filter,
+              'RECITATION' => :content_filter,
+              'PROHIBITED_CONTENT' => :content_filter,
+              'SPII' => :content_filter,
+              'IMAGE_SAFETY' => :content_filter
+            }
           end
         end
       end

@@ -4,7 +4,6 @@ require 'spec_helper'
 
 RSpec.describe Legion::Extensions::Llm::Gemini do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
-  let(:flash_model) { Legion::Extensions::Llm::Model::Info.new(id: 'gemini-2.0-flash', provider: :gemini) }
 
   before do
     Legion::Extensions::Llm.config.gemini_api_key = 'test-key'
@@ -36,7 +35,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
   end
 
   it 'builds Gemini content endpoints from model ids' do
-    expect(provider.generate_content_url(model: flash_model)).to eq(generation_url)
+    expect(provider.generate_content_url(model: 'gemini-2.0-flash')).to eq(generation_url)
   end
 
   it 'renders chat payloads in the Gemini generateContent format' do
@@ -47,6 +46,19 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(payload[:contents]).to eq([{ role: 'user', parts: [{ text: 'hello' }] }])
   end
 
+  it 'renders canonical messages to the identical Gemini wire payload (wire format unchanged)' do
+    messages = [
+      Legion::Extensions::Llm::Canonical::Message.build(role: :system, content: 'Be terse.'),
+      Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
+    ]
+
+    payload = provider.send(:render_payload, messages, tools: {}, params: params_with_temperature,
+                                                       model: 'gemini-2.0-flash', stream: false, schema: nil,
+                                                       thinking: nil, tool_prefs: nil)
+
+    expect(payload).to eq(chat_payload)
+  end
+
   it 'carries the folded system message through the actual callable into systemInstruction' do
     captured_payload = nil
     connection = instance_double(Legion::Extensions::Llm::Connection)
@@ -55,7 +67,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       captured_payload = payload
       fake_response(completion_response_body)
     end
-    callable = described_class::Actor::GeminiCallable.new(
+    callable = described_class::Helpers::Callable.new(
       instance_cfg: { gemini_api_key: 'test-key' }, logger: instance_double(Logger).as_null_object,
       provider: provider
     )
@@ -64,7 +76,7 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
     ]
 
-    callable.chat(messages: messages, model: 'gemini-2.0-flash')
+    callable.chat(messages, model: 'gemini-2.0-flash')
 
     expect(captured_payload[:systemInstruction]).to eq(
       parts: [{ text: 'Follow the exact system law.' }]
@@ -72,24 +84,109 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     expect(captured_payload[:contents]).to eq([{ role: 'user', parts: [{ text: 'hello' }] }])
   end
 
-  it 'parses Gemini completion responses' do
-    expect(completion_message.to_h).to include(role: :assistant, content: 'hi', model_id: 'gemini-2.0-flash')
-    expect([completion_message.input_tokens, completion_message.output_tokens]).to eq([3, 4])
+  it 'parses Gemini completion responses to a Canonical::Response (asserted by type)' do
+    response = completion_message
+    expect(response).to be_a(Legion::Extensions::Llm::Canonical::Response)
+    expect(response.text).to eq('hi')
+    expect(response.model).to eq('gemini-2.0-flash')
+    expect(response.usage).to be_a(Legion::Extensions::Llm::Canonical::Usage)
+    expect(response.usage.input_tokens).to eq(3)
+    expect(response.usage.output_tokens).to eq(4)
+    expect(response.stop_reason).to be_nil
   end
 
-  it 'parses Gemini model listings' do
-    expect(models.first.to_h).to include(id: 'gemini-2.0-flash', provider: :gemini)
-    expect(models.first.capabilities).to include(:streaming, :tools, :vision)
-    expect(models.last.capabilities).to eq([:embedding])
-    expect(models.last.modalities.to_h).to eq(input: ['text'], output: ['embeddings'])
+  it 'maps Gemini finishReason STOP to the canonical :end_turn stop reason' do
+    candidates = [{ 'content' => { 'parts' => [{ 'text' => 'hi' }] }, 'finishReason' => 'STOP' }]
+    body = completion_response_body.merge('candidates' => candidates)
+
+    response = provider.send(:parse_completion_response, fake_response(body))
+
+    expect(response.stop_reason).to eq(:end_turn)
+  end
+
+  it 'parses Gemini tool call responses to canonical ToolCall objects' do
+    body = {
+      'modelVersion' => 'gemini-2.0-flash',
+      'candidates' => [{
+        'content' => { 'parts' => [{ 'functionCall' => { 'name' => 'get_weather', 'args' => { 'city' => 'SF' } } }] },
+        'finishReason' => 'STOP'
+      }]
+    }
+
+    response = provider.send(:parse_completion_response, fake_response(body))
+
+    expect(response.tool_calls.size).to eq(1)
+    tool_call = response.tool_calls.first
+    expect(tool_call).to be_a(Legion::Extensions::Llm::Canonical::ToolCall)
+    expect(tool_call.name).to eq('get_weather')
+    expect(tool_call.arguments).to eq('city' => 'SF')
+    expect(response.stop_reason).to eq(:end_turn)
+  end
+
+  it 'parses Gemini thought parts into a canonical Thinking member' do
+    body = {
+      'modelVersion' => 'gemini-2.0-flash',
+      'candidates' => [{
+        'content' => { 'parts' => [
+          { 'text' => 'pondering', 'thought' => true },
+          { 'text' => 'the answer' }
+        ] },
+        'finishReason' => 'STOP'
+      }],
+      'usageMetadata' => { 'promptTokenCount' => 3, 'candidatesTokenCount' => 4, 'thoughtsTokenCount' => 9 }
+    }
+
+    response = provider.send(:parse_completion_response, fake_response(body))
+
+    expect(response.thinking).to be_a(Legion::Extensions::Llm::Canonical::Thinking)
+    expect(response.thinking.content).to eq('pondering')
+    expect(response.text).to eq('the answer')
+    expect(response.usage.thinking_tokens).to eq(9)
+    expect(response.usage.output_tokens).to eq(13)
+  end
+
+  it 'builds Canonical::Chunk objects from streaming SSE bodies (asserted by type)' do
+    chunk = provider.send(:build_chunk, stream_chunk_body)
+
+    expect(chunk).to be_a(Legion::Extensions::Llm::Canonical::Chunk)
+    expect(chunk.type).to eq(:text_delta)
+    expect(chunk.delta).to eq('Hel')
+  end
+
+  it 'streams a full SSE exchange through the canonical chunk pipeline ending in one done chunk' do
+    events = [
+      { 'candidates' => [{ 'content' => { 'parts' => [{ 'text' => 'Hel' }] } }] },
+      { 'candidates' => [{ 'content' => { 'parts' => [{ 'text' => 'lo' }] } }] },
+      {
+        'candidates' => [{ 'content' => { 'parts' => [{ 'text' => '' }] }, 'finishReason' => 'STOP' }],
+        'usageMetadata' => { 'promptTokenCount' => 3, 'candidatesTokenCount' => 2 }
+      }
+    ].map { |body| "data: #{Legion::JSON.dump(body)}\n\n" }
+
+    chunks, response = capture_stream(provider, events)
+
+    expect(chunks.size).to be > 0
+    expect(chunks).to all(be_a(Legion::Extensions::Llm::Canonical::Chunk))
+    expect(chunks.count(&:done?)).to eq(1)
+    expect(chunks.last).to be_done
+    text_deltas = chunks.select(&:text_delta?)
+    expect(text_deltas.map(&:delta).join).to eq('Hello')
+    expect(chunks.last.stop_reason).to eq(:end_turn)
+    expect(chunks.last.usage.output_tokens).to eq(2)
+    expect(response).to be_a(Legion::Extensions::Llm::Canonical::Response)
+    expect(response.text).to eq('Hello')
   end
 
   it 'does not expose a registry_publisher class method on Provider (§2 single engine)' do
     expect(described_class::Provider).not_to respond_to(:registry_publisher)
   end
 
-  it 'parses Gemini embedding responses' do
-    expect([embedding.vectors, embedding.input_tokens]).to eq([[0.1, 0.2], 2])
+  it 'parses Gemini embedding responses to the documented artifact shape' do
+    expect(embedding[:embedding]).to eq([0.1, 0.2])
+    expect(embedding[:text]).to eq('hello')
+    expect(embedding[:model]).to eq('gemini-embedding-001')
+    expect(embedding[:usage]).to be_a(Legion::Extensions::Llm::Canonical::Usage)
+    expect(embedding[:usage].input_tokens).to eq(2)
   end
 
   describe '.discover_instances' do
@@ -168,6 +265,17 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
       expect(instances[:staging]).to include(gemini_api_key: 'gk-staging', tier: :private)
     end
 
+    it 'excludes a disabled instance with a valid credential from claimable instances' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :gemini)
+        .and_return({ instances: { staging: { api_key: 'gk-staging', enabled: false } } })
+
+      instances = described_class.discover_instances
+
+      expect(instances).not_to have_key(:staging)
+      expect(instances).to eq({})
+    end
+
     it 'deduplicates credentials when env and settings share the same key' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:env).with('GEMINI_API_KEY').and_return('gk-same')
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
@@ -191,22 +299,51 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     end
   end
 
+  def params_with_temperature
+    Legion::Extensions::Llm::Canonical::Params.build(temperature: 0.2)
+  end
+
   def chat_payload
     messages = [
-      Legion::Extensions::Llm::Message.new(role: :system, content: 'Be terse.'),
-      Legion::Extensions::Llm::Message.new(role: :user, content: 'hello')
+      Legion::Extensions::Llm::Canonical::Message.build(role: :system, content: 'Be terse.'),
+      Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')
     ]
 
-    provider.send(:render_payload, messages, tools: {}, temperature: 0.2, model: flash_model, stream: false,
-                                             schema: nil, thinking: nil, tool_prefs: nil)
+    provider.send(:render_payload, messages, tools: {}, params: params_with_temperature, model: 'gemini-2.0-flash',
+                                             stream: false, schema: nil, thinking: nil, tool_prefs: nil)
+  end
+
+  def stream_chunk_body
+    { 'candidates' => [{ 'content' => { 'parts' => [{ 'text' => 'Hel' }] } }] }
+  end
+
+  # Drives the real streaming funnel (Streaming#stream_response) with a stubbed
+  # transport: the connection post yields a request whose on_data callback is
+  # fed the given SSE frames. Returns the chunks yielded to the block plus the
+  # accumulated Canonical::Response.
+  def capture_stream(target_provider, sse_events)
+    stub_stream_connection(target_provider, sse_events)
+
+    chunks = []
+    messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
+    response = target_provider.stream_chat(messages, model: 'gemini-2.0-flash') { |chunk| chunks << chunk }
+    [chunks, response]
+  end
+
+  def stub_stream_connection(target_provider, sse_events)
+    connection = instance_double(Legion::Extensions::Llm::Connection)
+    fake_request = Struct.new(:options).new(FakeStreamOptions.new)
+    allow(connection).to receive(:post) do |_url, _payload, &block|
+      block&.call(fake_request)
+      env = Struct.new(:status).new(200)
+      sse_events.each { |event| fake_request.options.on_data.call(event, 0, env) }
+      fake_response({})
+    end
+    target_provider.instance_variable_set(:@connection, connection)
   end
 
   def fake_response(body)
     Struct.new(:body).new(body)
-  end
-
-  def stub_model_discovery
-    allow(provider.connection).to receive(:get).with('models').and_return(fake_response(models_response_body))
   end
 
   def generation_url
@@ -225,31 +362,9 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     }
   end
 
-  def models
-    provider.send(:parse_list_models_response, fake_response(models_response_body), :gemini,
-                  described_class::Provider::Capabilities)
-  end
-
-  def models_response_body
-    {
-      'models' => [{
-        'name' => 'models/gemini-2.0-flash',
-        'displayName' => 'Gemini 2.0 Flash',
-        'inputTokenLimit' => 1_048_576,
-        'outputTokenLimit' => 8192,
-        'supportedGenerationMethods' => %w[generateContent streamGenerateContent]
-      }, {
-        'name' => 'models/gemini-embedding-001',
-        'displayName' => 'Gemini Embedding',
-        'inputTokenLimit' => 2048,
-        'outputTokenLimit' => 1,
-        'supportedGenerationMethods' => %w[embedContent]
-      }]
-    }
-  end
-
   def embedding
-    provider.send(:parse_embedding_response, fake_response(embedding_response_body), model: 'gemini-embedding-001')
+    response = fake_response(embedding_response_body)
+    provider.send(:parse_embedding_response, response, model: 'gemini-embedding-001', text: 'hello')
   end
 
   def embedding_response_body

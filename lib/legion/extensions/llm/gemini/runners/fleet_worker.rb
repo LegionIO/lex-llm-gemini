@@ -22,8 +22,6 @@ module Legion
               Legion::Extensions::Llm::Fleet::ProviderResponder.call(
                 payload: opts,
                 provider_family: Gemini::PROVIDER_FAMILY,
-                provider_class: Gemini::Provider,
-                provider_instances: -> { Gemini.discover_instances },
                 delivery: opts[:delivery],
                 properties: opts[:properties]
               )

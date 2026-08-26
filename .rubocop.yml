@@ -14,6 +14,11 @@ Metrics/BlockLength:
     - spec/**/*
 Metrics/MethodLength:
   Enabled: false
+# Aligned with the sibling lex-llm-* providers (vllm/anthropic): the rubocop
+# default ModuleLength (100) is too strict for a discovery runner carrying the
+# full evidence-building surface. Length is still bounded (Max 350).
+Metrics/ModuleLength:
+  Max: 350
 RSpec/ExampleLength:
   Enabled: false
 RSpec/MultipleExpectations:

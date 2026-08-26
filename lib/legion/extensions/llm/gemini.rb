@@ -3,7 +3,8 @@
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/gemini/provider'
 require 'legion/extensions/llm/gemini/version'
-require 'legion/extensions/llm/gemini/actors/discovery_refresh'
+require 'legion/extensions/llm/gemini/helpers/callable'
+require 'legion/extensions/llm/gemini/actors/discovery'
 
 module Legion
   module Extensions
@@ -76,15 +77,31 @@ module Legion
           return unless instances.is_a?(Hash)
 
           instances.each do |name, config|
-            next unless config.is_a?(Hash)
-
-            normalized = normalize_instance_config(config)
-            next unless normalized[:gemini_api_key]
-
-            normalized[:api_key] = normalized[:gemini_api_key]
-            normalized[:tier] ||= :cloud
-            candidates[name.to_sym] = normalized
+            add_settings_instance(candidates, name, config)
           end
+        end
+
+        def self.add_settings_instance(candidates, name, config)
+          return unless config.is_a?(Hash)
+
+          normalized = normalize_instance_config(config)
+          # enabled: false is a skip, not a credential: a disabled instance
+          # is never claimed (the discovery pipeline reads this method as
+          # the single claimable source).
+          return if normalized[:enabled] == false
+          return unless normalized[:gemini_api_key]
+          return if unresolved_env_reference?(normalized[:gemini_api_key])
+
+          normalized[:api_key] = normalized[:gemini_api_key]
+          normalized[:tier] ||= :cloud
+          candidates[name.to_sym] = normalized
+        end
+
+        # env:// resolution is the settings host's job (legion-settings
+        # Resolver, at boot); a literal placeholder must never be published as
+        # a key or fingerprinted.
+        def self.unresolved_env_reference?(value)
+          value.to_s.start_with?('env://')
         end
 
         def self.normalize_instance_config(config)
@@ -100,6 +117,11 @@ module Legion
 
         def self.promote_api_key(normalized)
           normalized[:gemini_api_key] ||= normalized.delete(:api_key)
+          # The registered default template nests the credential at
+          # credentials: { api_key: }; the shared pipeline's auth_token
+          # consumes that shape, so the catalog must see it too.
+          normalized[:gemini_api_key] ||=
+            (normalized[:credentials] || {}).is_a?(Hash) ? normalized.dig(:credentials, :api_key) : nil
         end
 
         def self.promote_api_base(normalized)
@@ -113,7 +135,8 @@ module Legion
         end
 
         private_class_method :discover_from_env, :discover_from_settings,
-                             :add_settings_api_key, :add_settings_instances, :normalize_instance_config,
+                             :add_settings_api_key, :add_settings_instances, :add_settings_instance,
+                             :unresolved_env_reference?, :normalize_instance_config,
                              :symbolize_config_keys, :promote_api_key, :promote_api_base,
                              :sanitize_instance_config
 
