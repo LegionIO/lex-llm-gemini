@@ -179,8 +179,8 @@ module Legion
               {
                 chat: op_evidence(operation: :chat, status: chat_status, observed_at: now),
                 stream_chat: op_evidence(operation: :stream_chat, status: stream_status, observed_at: now),
-                embed: op_evidence(operation: :embed,        status: embed_status,  observed_at: now),
-                image: op_evidence(operation: :image,        status: :unsupported,  observed_at: now),
+                embed: op_evidence(operation: :embed, status: embed_status, observed_at: now),
+                image: op_evidence(operation: :image, status: :unsupported, observed_at: now),
                 transcribe: op_evidence(operation: :transcribe, status: :unsupported, observed_at: now),
                 translate: op_evidence(operation: :translate, status: :unsupported, observed_at: now),
                 speak: op_evidence(operation: :speak, status: :unsupported, observed_at: now),
@@ -206,9 +206,9 @@ module Legion
               {
                 completion: cap_from_method(capability: :completion, methods: generation_methods,
                                             action: 'generateContent'),
-                streaming: cap_from_method(capability: :streaming,  methods: generation_methods,
+                streaming: cap_from_method(capability: :streaming, methods: generation_methods,
                                            action: 'streamGenerateContent'),
-                embedding: cap_from_method(capability: :embedding,  methods: generation_methods,
+                embedding: cap_from_method(capability: :embedding, methods: generation_methods,
                                            action: 'embedContent'),
                 tools: cap_evidence(capability: :tools, status: :unknown, source: :default_false),
                 thinking: cap_evidence(capability: :thinking, status: :unknown, source: :default_false),

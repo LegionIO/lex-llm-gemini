@@ -833,10 +833,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     it 'rejects plain Hash messages at the callable instead of delegating them' do
       expect { callable.chat(hash_request, model: 'gemini-2.0-flash') }
         .to raise_error(ArgumentError, /Canonical::Message/)
-      # rubocop:disable Lint/EmptyBlock -- the block never runs: enforcement raises first
-      expect { callable.stream_chat(hash_request, model: 'gemini-2.0-flash') { |_c| } }
+      expect { callable.stream_chat(hash_request, model: 'gemini-2.0-flash') { |_c| } } # rubocop:disable Lint/EmptyBlock -- the block never runs: enforcement raises first
         .to raise_error(ArgumentError, /Canonical::Message/)
-      # rubocop:enable Lint/EmptyBlock
       expect { callable.count_tokens(messages: hash_request, model: 'gemini-2.0-flash') }
         .to raise_error(ArgumentError, /Canonical::Message/)
     end
@@ -844,10 +842,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini do
     it 'rejects plain Hash messages at the base funnel (central enforcement, 08 F2)' do
       expect { provider.chat(hash_request, model: 'gemini-2.0-flash') }
         .to raise_error(ArgumentError, /Canonical::Message/)
-      # rubocop:disable Lint/EmptyBlock -- the block never runs: enforcement raises first
-      expect { provider.stream_chat(hash_request, model: 'gemini-2.0-flash') { |_c| } }
+      expect { provider.stream_chat(hash_request, model: 'gemini-2.0-flash') { |_c| } } # rubocop:disable Lint/EmptyBlock -- the block never runs: enforcement raises first
         .to raise_error(ArgumentError, /Canonical::Message/)
-      # rubocop:enable Lint/EmptyBlock
       expect { provider.count_tokens(messages: hash_request, model: 'gemini-2.0-flash') }
         .to raise_error(ArgumentError, /Canonical::Message/)
     end
