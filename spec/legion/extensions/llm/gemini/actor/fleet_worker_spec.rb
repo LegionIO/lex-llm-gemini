@@ -2,22 +2,11 @@
 
 require 'spec_helper'
 
-module Legion
-  module Extensions
-    module Actors
-      unless const_defined?(:Subscription, false)
-        class Subscription
-          def initialize(*) = true
-        end
-      end
-    end
-  end
-end
-
 require 'legion/extensions/llm/gemini/actors/fleet_worker'
 
 RSpec.describe Legion::Extensions::Llm::Gemini::Actor::FleetWorker do
-  subject(:actor) { described_class.new }
+  # Inspect the real dispatch methods without opening an AMQP subscription.
+  subject(:actor) { described_class.allocate }
 
   it 'resolves the runner to the module constant (Subscription dispatch calls runner_class.send)' do
     expect(actor.runner_class).to eq(Legion::Extensions::Llm::Gemini::Runners::FleetWorker)

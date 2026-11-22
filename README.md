@@ -2,7 +2,7 @@
 
 LegionIO LLM provider extension for Google Gemini.
 
-This gem lives under `Legion::Extensions::Llm::Gemini` and depends on `lex-llm >= 0.4.3` for shared provider-neutral routing, response normalization, fleet responder execution, and schema primitives. It does not require or call `legion-llm` at runtime; `legion-llm` owns adapter creation, routing, and registry writes after discovering loaded `lex-llm-*` provider gems.
+This gem lives under `Legion::Extensions::Llm::Gemini` and depends on `lex-llm >= 0.8.0` for shared provider-neutral routing, response normalization, fleet responder execution, and schema primitives. It does not require or call `legion-llm` at runtime; `legion-llm` owns adapter creation, routing, and registry writes after discovering loaded `lex-llm-*` provider gems.
 
 Load it with `require 'legion/extensions/llm/gemini'`.
 
@@ -16,6 +16,11 @@ Load it with `require 'legion/extensions/llm/gemini'`.
 - Normalized chat, streaming, vision, function calling, and embedding capability mapping from `supportedGenerationMethods`
 - Best-effort `llm.registry` availability events published to AMQP when transport is loaded
 - Shared fleet/default settings via `Legion::Extensions::Llm.provider_settings`
+
+Canonical tool JSON Schemas are rendered as `functionDeclarations[].parametersJsonSchema`
+for both chat and streaming. This preserves constraints such as `additionalProperties: false`
+and nested schema references. The provider does not close open schemas or change tool arguments.
+Gemini's typed `parameters` field is not used for these JSON Schema values.
 
 ## File Map
 
@@ -85,6 +90,9 @@ The Gemini entry point and provider use `Legion::Logging::Helper`:
 - Registry publishing is best-effort and must not block provider calls when transport is unavailable.
 
 ## Development
+
+The test bundle includes the published LegionIO host runtime. Specs load its real
+extension helpers and actor classes without starting services, subscriptions, or timers.
 
 ```bash
 bundle install
