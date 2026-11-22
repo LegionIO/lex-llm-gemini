@@ -131,7 +131,7 @@ module Legion
                 {
                   name: Legion::Extensions::Llm::Canonical::ToolSchema.tool_name(tool),
                   description: Legion::Extensions::Llm::Canonical::ToolSchema.tool_description(tool),
-                  parameters: schema
+                  parametersJsonSchema: schema
                 }
               end
             }]

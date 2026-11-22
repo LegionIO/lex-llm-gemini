@@ -7,6 +7,7 @@ gemspec
 # Local-tree resolution: use the adjacent lex-llm checkout when present so the
 # 0.8.0 conformance work resolves against the 0.8.x contract cut.
 group :test do
+  gem 'legionio', '>= 1.9.52', require: false
   lex_llm_path = File.expand_path('../lex-llm', __dir__)
   gem 'lex-llm', path: lex_llm_path if Dir.exist?(lex_llm_path)
 end

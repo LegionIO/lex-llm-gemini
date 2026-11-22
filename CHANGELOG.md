@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.7] - 2026-11-22
+
+### Fixed
+- Render canonical tool schemas in Gemini's `parametersJsonSchema` field instead of the restricted `parameters` Schema field, preserving `additionalProperties`, nested constraints, and references for synchronous and streaming requests. Fixes #12.
+
+### Added
+- HTTP-boundary regressions exercise the real provider and shared connection with closed zero-argument, implicitly open, explicitly open, and nested tool schemas, verifying exact schema preservation and unchanged canonical inputs.
+- Declare LegionIO as a test-only dependency and load its actual actor classes and extension helpers. Load required shared conformance examples unconditionally so missing dependencies fail the suite.
+
 ## [0.4.6] - 2026-08-20
 
 ### Changed

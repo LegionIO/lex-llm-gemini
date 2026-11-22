@@ -112,7 +112,8 @@ RSpec.describe Legion::Extensions::Llm::Gemini::Runners::Discovery do
   # ── D9: actor periodicity ───────────────────────────────────────────────────
 
   describe 'tick interval (actor time)' do
-    let(:actor) { Legion::Extensions::Llm::Gemini::Actor::Discovery.new }
+    # Interval accessors do not require starting the real background timer.
+    let(:actor) { Legion::Extensions::Llm::Gemini::Actor::Discovery.allocate }
 
     it 'returns the registered nested discovery interval' do
       settings_tree.replace(instances: { default: { discovery_interval: 3600 } })
